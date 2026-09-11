@@ -1,0 +1,12 @@
+# One phrase per line, case-insensitive, matched on word boundaries. Lines starting with # are ignored.
+# Add your own, in any language. Short phrases are risky: they fire mid-sentence.
+done for today
+that's it for today
+thats it for today
+i'm done
+im done
+stopping here
+save the handoff
+update the handoff
+wrap up here
+let's pick this up tomorrow
