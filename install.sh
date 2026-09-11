@@ -267,6 +267,20 @@ for pair in "${ADOPTER_OWNED[@]}"; do
   fi
 done
 
+# An upgrade-only nag, not a change. From 1.1.0 the SessionStart hook prints a registry
+# digest and CLAUDE.md no longer imports the whole registry. CLAUDE.md is adopter-owned and
+# is never overwritten, so someone upgrading from 1.0.0 keeps their "@CONTEXTS.md" line,
+# gets the new hook, and sees none of the saving. Nothing breaks either way, which is exactly
+# why it needs saying out loud: a silent no-op is the kind of thing nobody ever notices.
+if [ -f "$ROOT/CLAUDE.md" ] && grep -q '^@CONTEXTS\.md[[:space:]]*$' "$ROOT/CLAUDE.md"; then
+  echo
+  echo "note: your CLAUDE.md still has the line \"@CONTEXTS.md\", which imports the whole"
+  echo "      registry into every session. Since 1.1.0 the SessionStart hook prints a digest"
+  echo "      of it instead, so that import is now redundant and costs tokens every session."
+  echo "      CLAUDE.md is yours and is never overwritten, so remove that line by hand, and"
+  echo "      add a first activation step: read the context's own block in CONTEXTS.md."
+fi
+
 echo
 echo "hook entries in .claude/settings.json:"
 set +e
