@@ -1,14 +1,19 @@
 # Context router
 
 This folder is the single project root. Every session belongs to exactly one context: contexts are
-defined in the registry below, and the router says how to pick one and what to do once it is
+defined in `CONTEXTS.md`, and the router says how to pick one and what to do once it is
 picked.
 
-@CONTEXTS.md
+The registry is NOT imported here. The SessionStart hook prints a digest of it, every context
+name with its aliases, which is everything resolution needs. Once a context is resolved, read
+its one block from `CONTEXTS.md` for the cloud scope, home, IaC names and rules (section 2
+step 1 covers this). Search `CONTEXTS.md` directly for a folder path, or for any term the
+digest does not list. If the digest is missing from the session, read `CONTEXTS.md` in full
+before resolving anything.
 
 ## 0. First run
 
-If the registry below still only describes the three shipped example contexts (`northwind`,
+If the registry still only describes the three shipped example contexts (`northwind`,
 `platform`, `sideproject`), or nothing at all, the router is installed but not yet set up for your
 work. Use the `context-bootstrap` skill and do nothing else first.
 
@@ -48,20 +53,24 @@ work. Use the `context-bootstrap` skill and do nothing else first.
    Warning: never use `$CLAUDE_PROJECT_DIR` in a command you run yourself. Claude Code sets that
    variable for hook subprocesses only, and it is empty in an ordinary tool call, so a command using
    it silently resolves to `/.claude/...` and fails.
-1. Read `<home>/CLAUDE.md` if the context has a home and the file exists. Not every context has one
+1. Read the context's own block in `CONTEXTS.md`. The SessionStart digest carries names and
+   aliases only, which is enough to resolve but not to act: the block is where the cloud scope,
+   the home, the IaC names and the standing rules live, and those rules bind everything you do
+   in this context. Read the one block, not the file.
+2. Read `<home>/CLAUDE.md` if the context has a home and the file exists. Not every context has one
    yet: `new-context` seeds it for the one context it registers, but `context-bootstrap` does not
    write it for every folder it finds.
-2. Read `<home>/HANDOFF.md` if it exists.
-3. Read the context's memory index if it exists: `<memory_dir>/contexts/<ctx>/INDEX.md`. Resolve
+3. Read `<home>/HANDOFF.md` if it exists.
+4. Read the context's memory index if it exists: `<memory_dir>/contexts/<ctx>/INDEX.md`. Resolve
    `<memory_dir>` with
    `python3 -c "import sys; sys.path.insert(0, '<root>/.claude/lib'); import rootpath; print(rootpath.memory_dir())"`
    Open individual memory files only when needed.
-4. Write the marker so the status line and the session-end hook know the context. The session id is
+5. Write the marker so the status line and the session-end hook know the context. The session id is
    the `session_id:` line the SessionStart hook printed:
    `bash "<root>/.claude/scripts/set_context.sh" <ctx> <session_id>`
    On resume, compact or fork, if the SessionStart hook reports the context as unknown to the
    hooks, rewrite the marker now and do not re-ask which context this is.
-5. Start the first reply with the tag `[<ctx>]` followed by at most three lines from the handoff:
+6. Start the first reply with the tag `[<ctx>]` followed by at most three lines from the handoff:
    what is in flight, the next step, what is blocked. If there is no handoff, say so in one line.
 
 Every reply in the session starts with `[<ctx>]`.
