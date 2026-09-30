@@ -303,6 +303,31 @@ class ScriptTests(unittest.TestCase):
         self.write_kit_json({"owner": "someone"})
         updated = json.loads(self.bash("az account show").stdout)["hookSpecificOutput"]["updatedInput"]
         self.assertEqual(updated["command"], "cloudctx exec acme -- az account show")
+    def test_a_shell_write_into_another_context_is_denied_end_to_end(self):
+        """The hook passes its input's cwd through, so a relative path counts."""
+        other = self.root / "clients/globex"
+        other.mkdir(parents=True)
+        proc = self.run_hook(json.dumps({
+            "session_id": "sess", "tool_name": "Bash", "cwd": str(other),
+            "tool_input": {"command": "cat > notes.md <<EOF\nhi\nEOF"}}))
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stderr, "")
+        out = json.loads(proc.stdout)
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+        reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("'globex'", reason)
+        self.assertIn("'acme'", reason)
+
+    def test_a_shell_write_inside_the_active_context_emits_nothing_end_to_end(self):
+        own = self.root / "clients/acme"
+        own.mkdir(parents=True)
+        proc = self.run_hook(json.dumps({
+            "session_id": "sess", "tool_name": "Bash", "cwd": str(own),
+            "tool_input": {"command": f"echo hi > notes.md && cat {self.root}/clients/globex/f"}}))
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stdout, "")
+        self.assertEqual(proc.stderr, "")
+
 
 if __name__ == "__main__":
     unittest.main()

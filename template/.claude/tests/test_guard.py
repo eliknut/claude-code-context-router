@@ -746,5 +746,132 @@ class IacOwnershipTests(unittest.TestCase):
         self.assertEqual(self.write(self.NORTHWIND_TF, "northwind", reg, cfg={}).action, "deny")
 
 
+class ShellWriteTests(TreeFixture, unittest.TestCase):
+    """The write check applied to Bash: a shell write into another context is denied."""
+
+    def decide(self, command, active="acme", cwd=None, reg=None):
+        return guard.decide("Bash", {"command": command}, active, reg or REG,
+                            self.root, self.memory, cwd=str(cwd or self.root))
+
+    def other(self, rel=""):
+        return str(self.root / "clients/globex" / rel) if rel else str(self.root / "clients/globex")
+
+    def assert_denied(self, command, **kwargs):
+        d = self.decide(command, **kwargs)
+        self.assertEqual(d.action, "deny", command)
+        self.assertIn("'globex'", d.reason)
+        self.assertIn("'acme'", d.reason)
+        return d
+
+    def assert_allowed(self, command, **kwargs):
+        self.assertEqual(self.decide(command, **kwargs).action, "allow", command)
+
+    def test_a_heredoc_into_another_home_is_denied(self):
+        self.assert_denied(f"cat > {self.other('x.md')} <<EOF\nhello\n> quoted line\nEOF")
+
+    def test_an_append_redirect_is_denied(self):
+        self.assert_denied(f"echo hi >> {self.other('f')}")
+
+    def test_a_glued_redirect_is_denied(self):
+        self.assert_denied(f"echo hi >{self.other('f')}")
+        self.assert_denied(f"make 2>{self.other('err.log')}")
+
+    def test_tee_append_is_denied(self):
+        self.assert_denied(f"echo hi | tee -a {self.other('f')}")
+
+    def test_cp_into_another_home_is_denied(self):
+        self.assert_denied(f"cp a.txt {self.other()}/")
+
+    def test_cp_with_a_target_directory_option_is_denied(self):
+        self.assert_denied(f"cp -t {self.other()} a.txt b.txt")
+        self.assert_denied(f"cp --target-directory={self.other()} a.txt")
+
+    def test_mv_into_another_home_is_denied(self):
+        self.assert_denied(f"mv x {self.other('y')}")
+
+    def test_bsd_sed_in_place_is_denied(self):
+        self.assert_denied(f"sed -i '' 's/a/b/' {self.other('f')}")
+
+    def test_sed_with_a_backup_suffix_and_perl_in_place_are_denied(self):
+        self.assert_denied(f"sed -i.bak 's/a/b/' {self.other('f')}")
+        self.assert_denied(f"perl -pi -e 's/a/b/' {self.other('f')}")
+
+    def test_rm_is_denied(self):
+        self.assert_denied(f"rm {self.other('f')}")
+
+    def test_touch_mkdir_chmod_truncate_and_dd_are_denied(self):
+        for command in (f"touch {self.other('f')}", f"mkdir -p {self.other('d')}",
+                        f"chmod 644 {self.other('f')}", f"truncate -s 0 {self.other('f')}",
+                        f"dd if=/dev/zero of={self.other('f')} count=1",
+                        f"ln -s /tmp/x {self.other('link')}"):
+            with self.subTest(command=command):
+                self.assert_denied(command)
+
+    def test_a_cd_earlier_in_the_command_moves_the_base(self):
+        self.assert_denied(f"cd {self.other()} && touch f")
+        self.assert_denied(f"cd {self.other()}; echo x > f")
+
+    def test_a_relative_path_resolves_against_the_hook_cwd(self):
+        self.assert_denied("echo x > notes.md", cwd=self.other())
+
+    def test_a_glob_is_checked_by_its_directory(self):
+        self.assert_denied(f"rm {self.other()}/*.md")
+
+    def test_a_tilde_path_into_another_contexts_memory_is_denied(self):
+        with mock.patch.dict(os.environ, {"HOME": str(self.memory.parent)}):
+            self.assert_denied("echo x > ~/memory/contexts/globex/tenant.md")
+            self.assert_denied('echo x > "$HOME/memory/contexts/globex/tenant.md"')
+
+    def test_a_bash_c_string_is_read_too(self):
+        self.assert_denied(f"bash -c 'echo x > {self.other('f')}'")
+
+    def test_the_deny_wins_over_a_cloud_rewrite(self):
+        def cloud(command):
+            return guard.decide("Bash", {"command": command}, "globex", CLOUD_REG,
+                                self.root, self.memory, cwd=str(self.root))
+        # The control: the same call with no write is rewritten.
+        self.assertEqual(cloud("az group list").action, "update")
+        d = cloud(f"az group list > {self.root / 'clients/acme' / 'out.json'}")
+        self.assertEqual(d.action, "deny")
+        self.assertIn("'acme'", d.reason)
+
+    def test_the_noctx_token_is_no_escape_for_a_write(self):
+        self.assert_denied(f"echo x > {self.other('f')} #noctx")
+
+    def test_writes_into_the_active_home_are_allowed(self):
+        own = self.root / "clients/acme"
+        self.assert_allowed(f"cat > {own}/x.md <<EOF\nhi\nEOF")
+        self.assert_allowed(f"cd {own} && touch f && rm g")
+        self.assert_allowed("echo x > notes.md", cwd=own)
+
+    def test_writes_outside_every_context_are_allowed(self):
+        for command in ("echo x > /tmp/x", "make > /dev/null 2>&1", "cmd 2>/dev/null",
+                        "echo x | tee /dev/stdout", f"echo x > {self.root}/CONTEXTS.md"):
+            with self.subTest(command=command):
+                self.assert_allowed(command)
+
+    def test_reads_of_another_home_are_allowed(self):
+        for command in (f"cat {self.other('f')}", f"grep x {self.other('f')}",
+                        f"diff {self.other('a')} {self.other('b')}", f"ls {self.other()}",
+                        f"git -C {self.other()} status", f"wc -l < {self.other('f')}",
+                        f"cp {self.other('f')} /tmp/", f"rsync -a {self.other()}/ /tmp/copy/",
+                        f"sed 's/a/b/' {self.other('f')}"):
+            with self.subTest(command=command):
+                self.assert_allowed(command)
+
+    def test_a_quoted_redirect_is_not_a_redirect(self):
+        self.assert_allowed(f'echo "a > {self.other("f")}"')
+
+    def test_an_unexpanded_variable_is_skipped(self):
+        self.assert_allowed("echo x > $OUT/f")
+
+    def test_no_active_context_means_no_opinion_on_shell_writes(self):
+        self.assertEqual(self.decide(f"echo x > {self.other('f')}", active="").action, "allow")
+
+    def test_a_case_flipped_path_is_denied(self):
+        with mock.patch.object(guard, "_case_insensitive", lambda path: True):
+            self.assert_denied(f"echo x > {self.root}/Clients/Globex/x.md")
+
+
 if __name__ == "__main__":
     unittest.main()

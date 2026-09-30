@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.1.0
+
+- The guard's write check now covers `Bash` too (the shell-write check). A command that writes
+  into another context's home, owned folders or memory folder is denied: output redirects
+  (`>`, `>>`, `2>`, `&>`, heredocs), `tee`, `cp`, `mv`, `install`, `rsync`, `ln`, `sed -i`,
+  `perl -i`, `rm`, `touch`, `mkdir`, `truncate`, `chmod`, `dd of=` and `bash -c '...'` strings.
+  Relative paths resolve against the hook input's `cwd` and any `cd` in the command. The deny wins
+  over a cloud rewrite, and `#noctx` does not bypass it. Not caught: `python -c`, `eval`, `xargs`,
+  scripts and paths in variables.
+- `guard.decide()` takes a `cwd` keyword; the hook passes the input's `cwd` field.
+
 ## 2.0.1
 
 - The repository is now `claude-code-context-router` (was `context-router-kit`).

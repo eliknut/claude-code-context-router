@@ -119,7 +119,8 @@ Every reply in the session starts with `[<ctx>]`.
   yours means the file is a team change and needs approval.
 - Never write into another context's home, handoff or memory folder. The guard denies this for
   `Write`, `Edit` and `NotebookEdit`, including through a symlink and inside the memory tree. It
-  does not see a write made through Bash (`cat >`, `mv`, a python heredoc), so this rule binds you
+  also catches the common shell shapes in Bash (redirects, `tee`, `cp`, `mv`, `sed -i`, `rm`,
+  `touch`, `ln`), but not a write made by python, `eval` or a script, so this rule binds you
   whether or not the guard is watching.
 - Delegated subagents start blank. The guard prepends the active context's block (scope, home,
   standing rules) to every `Agent` or `Task` prompt, except a fork, which inherits the session.

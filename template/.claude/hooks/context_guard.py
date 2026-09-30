@@ -1,7 +1,8 @@
 """PreToolUse hook: keep a tool call inside the active context.
 
 Three checks, all decided in lib/guard.py. The write check denies a write into another
-context's home, handoff or memory. The cloud check rewrites a bare az, aws, terraform or
+context's home, handoff or memory, from Write, Edit or NotebookEdit and from the common
+shell shapes in a Bash command (redirects, tee, cp, mv, sed -i, rm and the like). The cloud check rewrites a bare az, aws, terraform or
 terragrunt call to run under the credential wrapper (cloudctx unless .claude/kit.json
 names another, or sets cloud_wrapper to false to turn the check off). The subagent check
 prepends the active context's block to a delegated subagent's prompt.
@@ -65,7 +66,8 @@ def main() -> int:
         tool_input = data.get("tool_input") or {}
         decision = guard.decide(data.get("tool_name", ""), tool_input,
                                 active_context(data.get("session_id", "")),
-                                reg, root, rootpath.memory_dir(), rootpath.config(root))
+                                reg, root, rootpath.memory_dir(), rootpath.config(root),
+                                cwd=data.get("cwd") or "")
         emit(decision, tool_input)
     except Exception as exc:  # noqa: BLE001
         print(f"context_guard skipped: {exc}", file=sys.stderr)

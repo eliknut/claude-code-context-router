@@ -141,6 +141,14 @@ and `Task` call. It does three checks:
 - **Write check.** A `Write`, `Edit` or `NotebookEdit` into another context's home, owned folders
   or memory folder is denied. Paths are resolved through symlinks and compared case-insensitively
   on macOS and Windows. Files no context owns (`CLAUDE.md`, `CONTEXTS.md`, `.claude/`) are allowed.
+- **Shell-write check.** The same rule for a `Bash` command. The guard reads the paths the command
+  writes and denies it when one is in another context: output redirects (`>`, `>>`, `2>`, `&>`,
+  including `cat > file <<EOF`), `tee`, the destination of `cp`, `mv`, `install`, `rsync` and `ln`
+  (and the sources `mv` removes), `sed -i` and `perl -i`, `rm`, `touch`, `mkdir`, `truncate`,
+  `chmod`, `dd of=`, and the same inside `bash -c '...'`. Relative paths resolve against the
+  session's working directory and any `cd` earlier in the command; `~` and `$HOME` are expanded.
+  Reads (`cat`, `grep`, `diff`, `<`, `git -C`) are never flagged. There is no `#noctx` for writes,
+  and this deny wins over a cloud rewrite.
 - **Cloud check.** A bare `az`, `aws`, `terraform` or `terragrunt` call that is one plain command
   is rewritten to `cloudctx exec <scope> -- <command>`. Anything it cannot rewrite safely is denied
   with the scoped form to use instead: pipes, `&&`, substitutions, redirects, a leading
@@ -152,7 +160,8 @@ and `Task` call. It does three checks:
 
 What it does **not** catch, so the rules in `CLAUDE.md` still matter:
 
-- Writes made through Bash: `cat > file`, `cp`, `mv`, `sed -i`, a python heredoc.
+- Bash writes the shell text does not show: `python -c`, `node -e`, `eval`, `xargs`, a script
+  file, `find -delete`, or a path held in a variable other than `$HOME` (such paths are skipped).
 - A cloud CLI inside a quoted string (`bash -c '...'`, `su -c '...'`), inside a script file, or
   behind an alias or shell function.
 - Anything run outside Claude Code's tools.
@@ -233,7 +242,7 @@ step 4 without your yes:
 
 1. Ask which folder becomes the project root, unless you already said. Never the home directory.
 2. Clone the release into a temporary directory, not into the root:
-   `git clone --depth 1 --branch v2.0.1 https://github.com/eliknut/claude-code-context-router "$(mktemp -d)/kit"`
+   `git clone --depth 1 --branch v2.1.0 https://github.com/eliknut/claude-code-context-router "$(mktemp -d)/kit"`
 3. Show the plan, writing nothing: `<clone>/install.sh --root <root>`
 4. Wait for a yes. On a yes, run it again with `--apply` (plus `--statusline` if you want the
    status line, the only thing written outside the root).

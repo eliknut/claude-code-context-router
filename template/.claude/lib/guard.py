@@ -576,6 +576,377 @@ def _decide_write(tool_name: str, tool_input: dict, active: str, reg: dict,
                     f"memory. Switch context first, or write inside '{active}'.")
 
 
+# The shell-write check: the write check above, applied to the paths a Bash command
+# writes. Best effort by design. It reads the shapes a session actually emits
+# (redirects, tee, cp, mv, install, rsync, ln, sed -i, perl -i, rm, touch, mkdir,
+# truncate, chmod, dd of=, and bash -c / sh -c strings) and not what a program does once
+# it runs: python -c, node -e, eval, xargs, a script file or a variable holding the path
+# all go unseen. A path it cannot resolve (an unexpanded $VAR) is skipped, not denied.
+# There is no escape hatch, on purpose: a write into another context is never the fix.
+
+# Operators whose next word is written. "<>" opens the file read-write, so it counts.
+_WRITE_REDIRECTS = frozenset({">", ">>", ">|", "&>", "&>>", "<>"})
+# Operators whose next word is read, or is a heredoc delimiter: never a write.
+_READ_REDIRECTS = frozenset({"<", "<<", "<<-", "<<<", "<&"})
+# Longest first, so ">>" is not read as two ">".
+_OPERATORS = ("&>>", "<<<", "<<-", "&&", "||", "|&", ";;", ">>", ">|", "&>", ">&", "<<",
+              "<&", "<>", ">", "<", "|", "&", ";", "(", ")")
+# Operators after which the shell starts a fresh simple command.
+_COMMAND_BREAKS = frozenset({"&&", "||", "|", "|&", "&", ";", ";;", "(", ")", "`"})
+# Words that precede the command that actually runs.
+_WRITE_WRAPPERS = frozenset({"sudo", "env", "nohup", "command", "exec", "time", "nice",
+                             "then", "do", "else", "if", "while", "until", "!", "{"})
+_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+# A heredoc opener, not a here-string (<<<).
+_HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+# Options that take a value, per command, so the value is not read as a path.
+_VALUE_OPTIONS = {
+    "touch": {"-t", "-d", "-r"},
+    "mkdir": {"-m"},
+    "truncate": {"-s", "-r"},
+    "install": {"-m", "-o", "-g", "-S"},
+    "cp": {"-S"}, "mv": {"-S"}, "ln": {"-S"},
+}
+_PATH_COMMANDS = frozenset({"rm", "rmdir", "unlink", "touch", "mkdir", "truncate", "chmod"})
+_COPY_COMMANDS = frozenset({"cp", "mv", "install", "rsync", "ln"})
+
+
+def _in_quotes_at(text: str, index: int) -> bool:
+    """Whether position `index` of one line sits inside a quoted string."""
+    quote = ""
+    for ch in text[:index]:
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+    return bool(quote)
+
+
+def _strip_heredoc_bodies(command: str) -> str:
+    """The command with every heredoc body removed.
+
+    The body is data for the command, not commands, so a markdown quote line such as
+    "> note" inside `cat > f <<EOF` must not read as a redirect. The redirect on the
+    opening line stays, and that is where the write is.
+    """
+    out: list[str] = []
+    pending: list[tuple[str, bool]] = []
+    for line in command.split("\n"):
+        if pending:
+            delimiter, dash = pending[0]
+            if (line.lstrip("\t") if dash else line) == delimiter:
+                pending.pop(0)
+            continue
+        out.append(line)
+        for match in _HEREDOC.finditer(line):
+            if not _in_quotes_at(line, match.start()):
+                pending.append((match.group(2), match.group(0)[2:3] == "-"))
+    return "\n".join(out)
+
+
+def _shell_words(text: str):
+    """One segment as tokens: ("w", word, starts_quoted) or ("op", operator, False).
+
+    Quote-aware, so `echo "a > b"` is one word and no redirect. A digit glued to a
+    redirect (2>, 1>>) is its file descriptor and is dropped. $( and a backtick become
+    a break, so the command inside is read as a command of its own. None when a quote
+    is never closed, since the shell refuses such a line anyway.
+    """
+    words: list[tuple[str, str, bool]] = []
+    state = {"current": "", "started": False, "quoted": False}
+
+    def flush():
+        if state["started"]:
+            words.append(("w", state["current"], state["quoted"]))
+        state.update(current="", started=False, quoted=False)
+
+    def add(piece: str, quoted: bool = False):
+        if not state["started"]:
+            state["quoted"] = quoted
+        state["current"] += piece
+        state["started"] = True
+
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "'":
+            end = text.find("'", i + 1)
+            if end < 0:
+                return None
+            add(text[i + 1:end], True)
+            i = end + 1
+            continue
+        if ch == '"':
+            j, buf = i + 1, ""
+            while j < n and text[j] != '"':
+                if text[j] == "\\" and j + 1 < n and text[j + 1] in '"\\$`':
+                    buf += text[j + 1]
+                    j += 2
+                    continue
+                buf += text[j]
+                j += 1
+            if j >= n:
+                return None
+            add(buf, True)
+            i = j + 1
+            continue
+        if ch == "\\":
+            add(text[i + 1:i + 2])
+            i += 2
+            continue
+        if ch.isspace():
+            flush()
+            i += 1
+            continue
+        if ch == "`" or text.startswith("$(", i):
+            flush()
+            words.append(("op", "`" if ch == "`" else "(", False))
+            i += 1 if ch == "`" else 2
+            continue
+        if ch == "#" and not state["started"]:
+            break
+        op = next((o for o in _OPERATORS if text.startswith(o, i)), None)
+        if op:
+            if (op[0] in "<>" and state["started"] and not state["quoted"]
+                    and state["current"].isdigit()):
+                state.update(current="", started=False)
+            flush()
+            words.append(("op", op, False))
+            i += len(op)
+            continue
+        add(ch)
+        i += 1
+    flush()
+    return words
+
+
+def _expand(word: str, starts_quoted: bool, cwd: str) -> str:
+    """The absolute path a word names, or "" when it cannot be known.
+
+    ~ and $HOME are expanded; any other $VAR means the path is unknown and is skipped.
+    A glob is reduced to its literal directory prefix, which is what it can reach.
+    """
+    home = os.path.expanduser("~")
+    word = re.sub(r"\$\{HOME\}|\$HOME(?![A-Za-z0-9_])", lambda _m: home, word)
+    if word.startswith("~") and not starts_quoted:
+        word = os.path.expanduser(word)
+    if "$" in word:
+        return ""
+    glob = re.search(r"[*?\[]", word)
+    if glob:
+        prefix = word[:glob.start()]
+        word = prefix[:prefix.rfind("/") + 1] or "."
+    if not word:
+        return ""
+    return os.path.normpath(os.path.join(cwd, word))
+
+
+def _positionals(args: list, value_options: set) -> list:
+    """The non-option arguments, skipping the value of any option that takes one."""
+    out = []
+    skip = False
+    options_done = False
+    for word in args:
+        text = word[0]
+        if skip:
+            skip = False
+            continue
+        if not options_done and text == "--":
+            options_done = True
+            continue
+        if not options_done and text.startswith("-") and text != "-":
+            if text in value_options:
+                skip = True
+            continue
+        out.append(word)
+    return out
+
+
+def _copy_destinations(cmd: str, args: list) -> list:
+    """The destination of cp, mv, install, rsync or ln, plus the sources mv removes."""
+    if cmd != "rsync":
+        for index, (text, quoted) in enumerate(args):
+            if text in ("-t", "--target-directory") and index + 1 < len(args):
+                return [args[index + 1]]
+            if text.startswith("--target-directory="):
+                return [(text.split("=", 1)[1], quoted)]
+            if text.startswith("-t") and not text.startswith("--") and len(text) > 2:
+                return [(text[2:], quoted)]
+    positionals = _positionals(args, _VALUE_OPTIONS.get(cmd, set()))
+    if cmd == "rsync":
+        # host:path is a remote end, not a local path.
+        positionals = [p for p in positionals if not re.match(r"^[^/]*:", p[0])]
+    if cmd == "install" and any(a[0] == "-d" for a in args):
+        return positionals
+    if len(positionals) >= 2:
+        # mv removes its sources, which is as much a write as rm.
+        return positionals if cmd == "mv" else positionals[-1:]
+    if cmd == "ln" and len(positionals) == 1:
+        # One argument: the link is made in the current directory.
+        return [(os.path.basename(positionals[0][0].rstrip("/")), False)]
+    return []
+
+
+def _in_place_files(cmd: str, args: list) -> list:
+    """The files sed -i or perl -i edits in place, or [] when it is not in-place."""
+    script_flags = "ef" if cmd == "sed" else "eE"
+    in_place = False
+    script_given = False
+    positionals = []
+    index = 0
+    while index < len(args):
+        text = args[index][0]
+        if text == "--in-place" or text.startswith("--in-place="):
+            in_place = True
+        elif text in ("--expression", "--file"):
+            script_given = True
+            index += 1
+        elif text.startswith(("--expression=", "--file=")):
+            script_given = True
+        elif text.startswith("-") and not text.startswith("--") and len(text) > 1:
+            cluster = text[1:]
+            for position, flag in enumerate(cluster):
+                if flag == "i":
+                    # The rest of the cluster is the backup suffix. BSD sed spells an
+                    # empty suffix as a separate '' argument.
+                    in_place = True
+                    if cmd == "sed" and cluster == "i" and index + 1 < len(args) \
+                            and args[index + 1][0] == "":
+                        index += 1
+                    break
+                if flag in script_flags:
+                    script_given = True
+                    if position == len(cluster) - 1:
+                        index += 1
+                    break
+        else:
+            positionals.append(args[index])
+        index += 1
+    if not in_place:
+        return []
+    return positionals if script_given else positionals[1:]
+
+
+def _simple_command_writes(words: list, cwd: str, depth: int):
+    """The (word, starts_quoted) targets one simple command writes, and the cwd after it."""
+    targets = []
+    argv = []
+    index = 0
+    while index < len(words):
+        kind, text, quoted = words[index]
+        nxt = words[index + 1] if index + 1 < len(words) else None
+        if kind == "op":
+            if nxt and nxt[0] == "w":
+                if text in _WRITE_REDIRECTS:
+                    targets.append((nxt[1], nxt[2]))
+                    index += 2
+                    continue
+                if text == ">&" and not (nxt[1].isdigit() or nxt[1] == "-"):
+                    targets.append((nxt[1], nxt[2]))
+                    index += 2
+                    continue
+                if text in _READ_REDIRECTS or text == ">&":
+                    index += 2
+                    continue
+            index += 1
+            continue
+        argv.append((text, quoted))
+        index += 1
+
+    while argv and (_ASSIGNMENT.match(argv[0][0]) or argv[0][0] in _WRITE_WRAPPERS):
+        wrapper = argv.pop(0)[0]
+        if wrapper in ("sudo", "env", "nice"):
+            while argv and argv[0][0].startswith("-"):
+                argv.pop(0)
+    if not argv:
+        return targets, cwd
+    cmd = os.path.basename(argv[0][0])
+    args = argv[1:]
+
+    if cmd in ("cd", "pushd"):
+        dest = [a for a in args if not a[0].startswith("-")]
+        new = _expand(dest[0][0], dest[0][1], cwd) if dest else os.path.expanduser("~")
+        return targets, new or cwd
+    if cmd == "tee":
+        targets.extend(_positionals(args, set()))
+    elif cmd in _COPY_COMMANDS:
+        targets.extend(_copy_destinations(cmd, args))
+    elif cmd in ("sed", "perl"):
+        targets.extend(_in_place_files(cmd, args))
+    elif cmd in _PATH_COMMANDS:
+        paths = _positionals(args, _VALUE_OPTIONS.get(cmd, set()))
+        if cmd == "chmod" and not any(a[0].startswith("--reference") for a in args):
+            paths = paths[1:]  # the mode
+        targets.extend(paths)
+    elif cmd == "dd":
+        targets.extend((a[0][3:], a[1]) for a in args if a[0].startswith("of="))
+    elif cmd in _SHELLS and depth < 3:
+        for position, (text, _quoted) in enumerate(args):
+            if text.startswith("-") and not text.startswith("--") and "c" in text[1:]:
+                if position + 1 < len(args):
+                    targets.extend((path, False) for path in
+                                   _shell_write_paths(args[position + 1][0], cwd, depth + 1))
+                break
+    return targets, cwd
+
+
+def _shell_write_paths(command: str, cwd: str, depth: int = 0) -> list[str]:
+    paths: list[str] = []
+    for segment in split_segments(_strip_heredoc_bodies(command)):
+        words = _shell_words(segment)
+        if words is None:
+            continue
+        simple: list = []
+        for word in words + [("op", ";", False)]:
+            if word[0] == "op" and word[1] in _COMMAND_BREAKS:
+                if simple:
+                    found, cwd = _simple_command_writes(simple, cwd, depth)
+                    for text, quoted in found:
+                        path = _expand(text, quoted, cwd)
+                        if path and path not in paths:
+                            paths.append(path)
+                simple = []
+            else:
+                simple.append(word)
+    return paths
+
+
+def shell_write_targets(command: str, cwd: str = "") -> list[str]:
+    """Absolute paths a Bash command writes, as far as its text shows them.
+
+    Relative paths resolve against `cwd` (the hook input's cwd, else this process's),
+    and a `cd DIR` earlier in the same command moves that base, last cd winning.
+    Paths that come out already absolute (/dev/null, /tmp/x) are returned too; whether
+    they matter is owner_of()'s question.
+    """
+    return _shell_write_paths(command, cwd or os.getcwd())
+
+
+def _decide_shell_write(tool_input: dict, active: str, reg: dict, root: Path,
+                        memory_root: Path, cwd: str,
+                        iac_root: str = "") -> Decision | None:
+    """Deny a Bash command that writes into a context other than the active one.
+
+    Mirrors _decide_write: no active context means no opinion. Returns None when there
+    is nothing to deny, so the cloud check still runs.
+    """
+    if not active:
+        return None
+    command = tool_input.get("command", "")
+    if not isinstance(command, str) or not command:
+        return None
+    for target in shell_write_targets(command, cwd):
+        owner = owner_of(target, reg, root, memory_root, iac_root)
+        if owner and owner != active:
+            return Decision("deny",
+                            f"This command writes to {target}, which belongs to context "
+                            f"'{owner}', but '{active}' is the active context. CLAUDE.md "
+                            f"section 4: never write into another context's home, handoff or "
+                            f"memory, through Bash as much as through Write or Edit. Switch "
+                            f"context first, or write inside '{active}'.")
+    return None
+
 # Both names reach this hook: Task is the older spelling of the delegation tool.
 AGENT_TOOLS = {"Agent", "Task"}
 
@@ -631,20 +1002,25 @@ def _decide_agent(tool_input: dict, active: str, reg: dict) -> Decision:
 
 
 def decide(tool_name: str, tool_input: dict, active: str, reg: dict,
-           root: Path, memory_root: Path, cfg: dict | None = None) -> Decision:
+           root: Path, memory_root: Path, cfg: dict | None = None,
+           cwd: str = "") -> Decision:
     """The guard's whole decision, as plain data in and plain data out.
 
     `cfg` is the parsed .claude/kit.json: its cloud_wrapper names the credential
     wrapper (or disables the cloud check), and its iac.root lets IaC folders count
-    as owned by their context.
+    as owned by their context. `cwd` is the hook input's working directory, the base
+    for relative paths in a Bash command's writes.
     """
     cfg = cfg or {}
+    iac = cfg.get("iac")
+    iac_root = str(iac.get("root") or "") if isinstance(iac, dict) else ""
     if tool_name in WRITE_TOOLS:
-        iac = cfg.get("iac")
-        iac_root = str(iac.get("root") or "") if isinstance(iac, dict) else ""
         return _decide_write(tool_name, tool_input, active, reg, root, memory_root, iac_root)
     if tool_name == "Bash":
-        return _decide_bash(tool_input, active, reg, cloud_wrapper(cfg))
+        # The shell-write deny comes first, so it wins over a cloud rewrite: rewriting
+        # `az ... > <other home>/out.json` into the wrapper would still write there.
+        denied = _decide_shell_write(tool_input, active, reg, root, memory_root, cwd, iac_root)
+        return denied or _decide_bash(tool_input, active, reg, cloud_wrapper(cfg))
     if tool_name in AGENT_TOOLS:
         return _decide_agent(tool_input, active, reg)
     return ALLOW
