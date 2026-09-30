@@ -254,9 +254,11 @@ def split_segments(command: str) -> list[str]:
             current += ch
             i += 1
             continue
-        if ch == "#" and (not current or current[-1].isspace() or current[-1] in "(){}"):
+        if ch == "#" and (not current or current[-1].isspace()
+                          or (current[-1] in ";&|()" and not current.endswith("$("))):
             # A comment runs to the end of its line. Its text is not shell, so an
-            # apostrophe in it (# don't) must not open a quote.
+            # apostrophe in it (# don't) must not open a quote. Only a # that starts a
+            # word counts: ${#arr[@]}, $#, ${x##*/}, a#b and url#frag are not comments.
             newline = command.find("\n", i)
             i = len(command) if newline < 0 else newline
             continue
@@ -425,7 +427,9 @@ def cloud_hits(command: str) -> list[str]:
     there is not the segment's first token.
     """
     hits = []
-    for segment in split_segments(command):
+    # A heredoc body is data, so a docs file with an "az login" line is not a cloud call.
+    # A body fed to a shell is run, and _strip_heredoc_bodies keeps that one.
+    for segment in split_segments(_strip_heredoc_bodies(command)):
         # No explicit wrapper skip: the wrapper is not in CLOUD_COMMANDS, so a segment
         # whose command is the wrapper already fails the membership test below.
         if not _parses(segment):
@@ -461,7 +465,7 @@ def is_simple(command: str) -> bool:
     """True when wrapping the whole command in the credential wrapper is safe."""
     if len(split_segments(command)) != 1:
         return False
-    if "\n" in command:
+    if "\n" in command.rstrip("\n"):
         # A comment line counts as no segment, so "# note\naz ..." is one segment, yet
         # wrapping it would leave the az line outside cloudctx exec.
         return False
@@ -640,6 +644,8 @@ _WRITE_WRAPPERS = frozenset(_WRAPPER_VALUE_OPTIONS) | {
 _SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
 # A heredoc opener, not a here-string (<<<).
 _HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+# A heredoc opener line that hands the body to a shell, which runs it.
+_SHELL_FED = re.compile(r"(^|[|;&(]\s*)((sudo|env|exec)\s+)?(\S*/)?(bash|sh|zsh|dash|ksh)\b")
 # Options that take a value, per command, so the value is not read as a path.
 _VALUE_OPTIONS = {
     "touch": {"-t", "-d", "-r"},
@@ -655,7 +661,7 @@ _CHMOD_MODE = re.compile(r"^([ugoa]*[-+=][rwxXstugo]*)+(,([ugoa]*[-+=][rwxXstugo
 # git subcommands that change the working tree or the repository.
 _GIT_WRITES = frozenset({"commit", "checkout", "switch", "reset", "mv", "rm", "add", "restore",
                          "stash", "merge", "rebase", "pull", "apply", "clean", "cherry-pick",
-                         "revert", "am"})
+                         "revert", "am", "fetch", "push"})
 _GIT_CLONE_VALUES = {"-b", "--branch", "-o", "--origin", "--depth", "--reference", "-c",
                      "--config", "-j", "--jobs", "-u", "--upload-pack", "--template",
                      "--separate-git-dir", "--filter", "--shallow-since", "--shallow-exclude"}
@@ -678,20 +684,24 @@ def _strip_heredoc_bodies(command: str) -> str:
 
     The body is data for the command, not commands, so a markdown quote line such as
     "> note" inside `cat > f <<EOF` must not read as a redirect. The redirect on the
-    opening line stays, and that is where the write is.
+    opening line stays, and that is where the write is. A body fed to a shell
+    (`bash <<EOF`, `cat <<EOF | sh`) is commands after all, so it is kept.
     """
     out: list[str] = []
-    pending: list[tuple[str, bool]] = []
+    pending: list[tuple[str, bool, bool]] = []
     for line in command.split("\n"):
         if pending:
-            delimiter, dash = pending[0]
+            delimiter, dash, keep = pending[0]
             if (line.lstrip("\t") if dash else line) == delimiter:
                 pending.pop(0)
+            elif keep:
+                out.append(line)
             continue
         out.append(line)
+        executed = bool(_SHELL_FED.search(_unquoted_text(line)))
         for match in _HEREDOC.finditer(line):
             if not _in_quotes_at(line, match.start()):
-                pending.append((match.group(2), match.group(0)[2:3] == "-"))
+                pending.append((match.group(2), match.group(0)[2:3] == "-", executed))
     return "\n".join(out)
 
 
@@ -1030,6 +1040,8 @@ def _download_targets(cmd: str, args: list) -> list:
     elif cmd == "tar":
         return _tar_targets(args)
     elif cmd == "patch":
+        if any(a[0] in ("--dry-run", "--check", "-C") for a in args):
+            return []
         opts = _short_options(args, "pidorBzDFVYg")
         out = [v for letter, v in opts if letter == "o" and v]
         out += _long_values(args, {"--output"})
@@ -1080,7 +1092,19 @@ def _git_targets(args: list, cwd: str) -> list:
                 return []
             index += 2
             continue
-        if text in ("-c", "--git-dir", "--work-tree", "--namespace") and index + 1 < len(args):
+        if text in ("--git-dir", "--work-tree") and index + 1 < len(args):
+            repo = _expand(args[index + 1][0], args[index + 1][1], repo)
+            if not repo:
+                return []
+            index += 2
+            continue
+        if text.startswith(("--git-dir=", "--work-tree=")):
+            repo = _expand(text.split("=", 1)[1], args[index][1], repo)
+            if not repo:
+                return []
+            index += 1
+            continue
+        if text in ("-c", "--namespace") and index + 1 < len(args):
             index += 2
             continue
         if text.startswith("-"):
@@ -1104,8 +1128,63 @@ def _git_targets(args: list, cwd: str) -> list:
     if sub == "mv":
         paths = [_expand(p[0], p[1], repo) for p in _positionals(rest, set())]
         return [(p, False) for p in paths if p] or [(repo, False)]
+    if sub in ("stash", "apply", "tag", "branch", "config", "worktree"):
+        return _git_subcommand_targets(sub, rest, repo)
     if sub in _GIT_WRITES:
         return [(repo, False)]
+    return []
+
+
+def _git_subcommand_targets(sub: str, rest: list, repo: str) -> list:
+    """git subcommands that read or write depending on their arguments."""
+    flags = [a[0] for a in rest]
+    write = [(repo, False)]
+    if sub == "stash":
+        return [] if flags and flags[0] in ("list", "show") else write
+    if sub == "apply":
+        checks = {"--check", "--stat", "--numstat", "--summary"}
+        return [] if checks & set(flags) and "--apply" not in flags else write
+    if sub == "tag":
+        if {"-d", "--delete", "-a", "-s", "-f", "-m", "-F"} & set(flags):
+            return write
+        listing = {"-l", "--list", "-v", "--verify"} & set(flags)
+        named = _positionals(rest, {"--sort", "--format", "--contains", "--points-at", "-n"})
+        return write if named and not listing else []
+    if sub == "branch":
+        writes = {"-d", "-D", "-m", "-M", "-c", "-C", "--delete", "--move", "--copy", "-f",
+                  "--force", "-u", "--unset-upstream", "--edit-description"}
+        if writes & set(flags) or any(f.startswith("--set-upstream-to") for f in flags):
+            return write
+        listing = {"-l", "--list", "-a", "--all", "-r", "--remotes", "-v", "-vv",
+                   "--show-current", "--contains", "--merged", "--no-merged", "--points-at"}
+        if listing & set(flags) or any(f.startswith(("--sort", "--format", "--contains=",
+                                                     "--merged=", "--no-merged=")) for f in flags):
+            return []
+        named = _positionals(rest, {"--contains", "--merged", "--no-merged", "--points-at"})
+        return write if named else []
+    if sub == "config":
+        if {"--global", "--system"} & set(flags):
+            return []
+        files = _long_values(rest, {"--file"}) + [
+            rest[i + 1] for i, f in enumerate(flags) if f == "-f" and i + 1 < len(rest)]
+        target = [(_expand(f[0], f[1], repo), False) for f in files] or write
+        reads = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l",
+                 "--get-color", "--get-colorbool"}
+        if reads & set(flags):
+            return []
+        if {"--unset", "--unset-all", "--add", "--replace-all", "--rename-section",
+                "--remove-section", "-e", "--edit"} & set(flags):
+            return target
+        return target if len(_positionals(rest, {"-f", "--file", "--type", "--default"})) >= 2 else []
+    # worktree
+    action = flags[0] if flags else ""
+    paths = [_expand(p[0], p[1], repo) for p in _positionals(rest[1:], {"-b", "-B", "--reason"})]
+    if action == "add":
+        return [(p, False) for p in paths[:1] if p]
+    if action in ("remove", "move"):
+        return [(p, False) for p in paths if p] + write
+    if action in ("prune", "lock", "unlock", "repair"):
+        return write
     return []
 
 
@@ -1190,6 +1269,7 @@ def _simple_command_writes(words: list, state: dict, depth: int) -> list:
         argv.append((text, quoted))
         index += 1
 
+    run_in = ""  # env -C DIR runs the command in DIR, not in the shell's cwd.
     while argv:
         word = argv[0][0]
         if _ASSIGNMENT.match(word):
@@ -1201,15 +1281,23 @@ def _simple_command_writes(words: list, state: dict, depth: int) -> list:
         argv.pop(0)
         values = _WRAPPER_VALUE_OPTIONS.get(name, set())
         while argv and argv[0][0].startswith("-") and argv[0][0] != "-":
-            option = argv.pop(0)[0]
+            option, option_quoted = argv.pop(0)
             if option == "--":
                 break
-            if option in values and argv:
-                argv.pop(0)
+            if name == "env" and option.startswith("--chdir="):
+                run_in = _expand(option.split("=", 1)[1], option_quoted, state["cwd"])
+            elif option in values and argv:
+                value = argv.pop(0)
+                if name == "env" and option in ("-C", "--chdir"):
+                    run_in = _expand(value[0], value[1], state["cwd"])
         if name == "timeout" and argv:
             argv.pop(0)  # the duration
     if not argv:
         return targets
+    if run_in:
+        inner = dict(state, cwd=run_in, dirs=list(state["dirs"]))
+        found = _simple_command_writes([("w", t, q) for t, q in argv], inner, depth)
+        return targets + [(p, False) for p in (_expand(t, q, run_in) for t, q in found) if p]
     cmd = os.path.basename(argv[0][0])
     args = argv[1:]
     cwd = state["cwd"]

@@ -146,13 +146,16 @@ and `Task` call. It does three checks:
   including `cat > file <<EOF`), `tee`, the destination of `cp`, `mv`, `install`, `rsync` and `ln`
   (and the sources `mv` removes), `sed -i` and `perl -i`, `rm`, `touch`, `mkdir`, `truncate`,
   `chmod`, `dd of=`, `curl -o`/`-O`, `wget`, `tar -x -C` and `tar -c -f`, `unzip`, `sort -o`,
-  `patch`, git subcommands that write (`commit`, `checkout`, `reset`, `pull`, `mv`, `clone` and
-  others; the repo or `-C DIR` counts as the target), `find -delete` and `find -exec`, and the
+  `patch`, git subcommands that write (`commit`, `checkout`, `reset`, `pull`, `fetch`, `push`,
+  `tag`, `branch -d`, `config key value`, `worktree add`, `mv`, `clone` and others; the repo,
+  `-C DIR`, `--git-dir` or `--work-tree` counts as the target), `env -C DIR`, `find -delete` and
+  `find -exec`, a heredoc fed to a shell (`bash <<EOF`), and the
   same inside `bash -c '...'` and `$(...)`, quoted or not. Relative paths resolve against the
   session's working directory and any `cd`, `pushd` or `popd` earlier in the command (a `cd`
   inside `( ... )` ends with the subshell); `~`, `$HOME` and `$PWD` are expanded. Reads (`cat`,
-  `grep`, `diff`, `<`, and read-only git such as `git -C DIR status`, `log` or `diff`) are not
-  flagged. There is no `#noctx` for writes, this deny wins over a cloud rewrite, and a fault in
+  `grep`, `diff`, `<`, read-only git such as `git -C DIR status`, `log`, `diff`, `stash list`,
+  `branch`, `tag -l` or `apply --check`, and `patch --dry-run`) are not flagged, and a heredoc
+  body written to a file is data, so neither check reads it as commands. There is no `#noctx` for writes, this deny wins over a cloud rewrite, and a fault in
   this parser skips only this check, never the cloud check.
 - **Cloud check.** A bare `az`, `aws`, `terraform` or `terragrunt` call that is one plain command
   is rewritten to `cloudctx exec <scope> -- <command>`. Anything it cannot rewrite safely is denied
@@ -167,7 +170,7 @@ What it does **not** catch, so the rules in `CLAUDE.md` still matter:
 
 - Bash writes the shell text does not show: `python -c`, `node -e`, `eval`, `xargs`, a script
   file, a shell function or alias, or a path held in a variable other than `$HOME` or `$PWD`
-  (such paths are skipped).
+  (such paths are skipped), which includes `find -exec bash -c '... "$1"' _ {} \;`.
 - A cloud CLI inside a quoted string (`bash -c '...'`, `su -c '...'`), inside a script file, or
   behind an alias or shell function.
 - Anything run outside Claude Code's tools.

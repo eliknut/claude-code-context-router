@@ -949,7 +949,7 @@ class ShellWriteReviewTests(TreeFixture, unittest.TestCase):
     def test_git_reads_are_allowed(self):
         self.assert_allowed("git -C ../globex status", "git -C ../globex log --oneline",
                             "git -C ../globex diff", "git -C ../globex show HEAD",
-                            "git -C ../globex fetch", "git -C ../globex branch",
+                            "git -C ../globex branch",
                             "git -C ../globex remote -v", "git -C ../globex rev-parse HEAD",
                             "git -C ../globex worktree list", "git commit -m 'x > ../globex/f'")
 
@@ -1003,6 +1003,103 @@ class ShellWriteReviewTests(TreeFixture, unittest.TestCase):
         self.assert_allowed("pushd ../globex; ls; popd; echo x > notes.md",
                             "cd ../globex; ls; cd -; echo x > notes.md")
         self.assert_denied("pushd ../globex && touch f", "pushd /tmp; popd; pushd ../globex; touch f")
+
+
+class ShellWriteRoundTwoTests(TreeFixture, unittest.TestCase):
+    """Second review round: comment detection, heredocs in the cloud check, git."""
+
+    def decide(self, command, cwd=None):
+        return guard.decide("Bash", {"command": command}, "acme", REG, self.root,
+                            self.memory, cwd=str(cwd or self.root / "clients/acme"))
+
+    def other(self):
+        return self.root / "clients/globex"
+
+    def assert_denied(self, *commands, cwd=None):
+        for command in commands:
+            with self.subTest(command=command):
+                d = self.decide(command, cwd)
+                self.assertEqual(d.action, "deny", command)
+                self.assertIn("'globex'", d.reason)
+
+    def assert_allowed(self, *commands, cwd=None):
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(self.decide(command, cwd).action, "allow", command)
+
+    def cloud(self, command):
+        return guard.decide("Bash", {"command": command}, "globex", CLOUD_REG,
+                            self.root, self.memory, cwd=str(self.root))
+
+    # 1. A # that does not start a word is not a comment.
+    def test_hash_inside_a_word_is_not_a_comment_to_the_splitter(self):
+        for command in ("echo ${#arr[@]}; az group list", "echo $#; az group list",
+                        "[[ $x == *#* ]]; az group list", "echo a#b; az group list",
+                        "curl https://x/#frag; az group list", "echo ${x#prefix}; az group list",
+                        "echo ${x##*/}; az group list"):
+            with self.subTest(command=command):
+                self.assertEqual(len(guard.split_segments(command)), 2, command)
+
+    def test_a_cloud_call_after_a_parameter_expansion_is_not_let_through(self):
+        self.assertEqual(self.cloud("echo ${#arr[@]}; az group delete -n rg --yes").action, "deny")
+        self.assertEqual(self.cloud("n=${#x}; terraform apply -auto-approve").action, "deny")
+
+    def test_a_write_after_a_parameter_expansion_is_denied(self):
+        self.assert_denied("echo ${#x} > ../globex/f", "echo ${#arr[@]}; touch ../globex/f",
+                           "echo $#; touch ../globex/f", "echo a#b; touch ../globex/f",
+                           "echo ${x##*/} > ../globex/f")
+
+    def test_a_hash_after_an_operator_is_still_a_comment(self):
+        self.assertEqual(guard.split_segments("ls;# it's\naz group list"), ["ls", "az group list"])
+
+    # 2. A trailing newline alone does not block the rewrite.
+    def test_a_trailing_newline_is_still_rewritten(self):
+        d = self.cloud("az account show\n")
+        self.assertEqual(d.action, "update")
+        self.assertTrue(d.updated_input["command"].startswith("cloudctx exec globex -- az"))
+
+    # 3. Heredoc bodies are data to the cloud check, unless a shell runs them.
+    def test_a_heredoc_body_mentioning_a_cloud_cli_is_not_a_cloud_call(self):
+        for command in ("cat > /tmp/n.md <<EOF\naz login\nEOF",
+                        "cat > /tmp/n.md <<'EOF'\naz login\nterraform plan\nEOF"):
+            with self.subTest(command=command):
+                self.assertEqual(self.cloud(command).action, "allow")
+
+    def test_a_heredoc_fed_to_a_shell_is_still_checked(self):
+        for command in ("cat <<EOF | bash\naz login\nEOF", "bash <<EOF\naz login\nEOF"):
+            with self.subTest(command=command):
+                self.assertEqual(self.cloud(command).action, "deny")
+        self.assert_denied("bash <<EOF\ntouch ../globex/f\nEOF")
+        self.assert_allowed("cat > notes.md <<EOF\ntouch ../globex/f\nEOF")
+
+    # 4. Reads inside another home.
+    def test_git_and_patch_reads_in_another_home_are_allowed(self):
+        self.assert_allowed("git stash list", "git stash show -p", "git apply --check /tmp/d",
+                            "git apply --stat /tmp/d", "git apply --numstat /tmp/d",
+                            "patch --dry-run -p1 < /tmp/d", "git branch", "git branch -a",
+                            "git branch --list", "git branch -v", "git tag", "git tag -l",
+                            "git config user.name", "git config --get user.name",
+                            "git config --list", "git config --global user.name x",
+                            "git worktree list", cwd=self.other())
+
+    # 5. More git writes, and env -C.
+    def test_more_git_writes_are_denied(self):
+        self.assert_denied("git -C ../globex tag v1", "git -C ../globex tag -d v1",
+                           "git -C ../globex branch -D x", "git -C ../globex branch newname",
+                           "git -C ../globex config user.name x",
+                           "git -C ../globex config --unset user.name",
+                           "git worktree add ../globex/wt", "git -C ../globex worktree remove wt",
+                           "git -C ../globex fetch", "git -C ../globex push",
+                           "git --git-dir=../globex/.git commit -m x",
+                           "git --work-tree ../globex checkout .")
+        self.assert_denied("git stash", "git stash pop", "git apply /tmp/d", cwd=self.other())
+
+    def test_env_chdir_moves_the_commands_cwd(self):
+        self.assert_denied("env -C ../globex touch f", "env --chdir=../globex rm f")
+        self.assert_allowed("env -C /tmp touch f", "env -C ../globex ls > notes.md")
+
+    def test_find_exec_bash_c_is_read(self):
+        self.assert_denied("find . -name x -exec bash -c 'cp \"$1\" ../globex/' _ {} \\;")
 
 
 if __name__ == "__main__":

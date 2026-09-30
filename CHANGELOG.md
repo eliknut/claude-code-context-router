@@ -17,7 +17,13 @@
 - Command splitting now knows comments and backslash escapes, so an apostrophe in a comment
   (`# don't`) or an escaped quote no longer hides the lines after it, and `>|` is read as a
   redirect rather than a pipe. A command that spans several lines is never rewritten by the
-  cloud check as a whole; it is denied with the scoped form instead.
+  cloud check as a whole; it is denied with the scoped form instead. Only a `#` that starts a
+  word is a comment, so `${#arr[@]}`, `$#`, `${x##*/}` and `a#b` are read as shell.
+- The cloud check skips heredoc bodies, so writing a doc with an `az login` line is no longer
+  denied. A body fed to a shell (`bash <<EOF`, `cat <<EOF | sh`) is still checked.
+- More git in the shell-write check: `fetch`, `push`, `tag`, `branch` with a name or `-d`,
+  `config` that sets a value, `worktree add` and `remove`, `--git-dir` and `--work-tree`; and
+  `env -C DIR`. `git stash list`, `git apply --check` and `patch --dry-run` stay reads.
 - `guard.decide()` takes a `cwd` keyword; the hook passes the input's `cwd` field.
 
 ## 2.0.1
