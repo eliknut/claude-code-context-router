@@ -230,19 +230,6 @@ def split_segments(command: str) -> list[str]:
     i = 0
     while i < len(command):
         ch = command[i]
-        if quote == "'":
-            current += ch
-            if ch == quote:
-                quote = ""
-            i += 1
-            continue
-        if ch == "\\":
-            # An escaped character is literal, in or out of double quotes: echo it\'s
-            # opens no quote, and a quote that is never opened cannot swallow the lines
-            # after it.
-            current += command[i:i + 2]
-            i += 2
-            continue
         if quote:
             current += ch
             if ch == quote:
@@ -254,23 +241,10 @@ def split_segments(command: str) -> list[str]:
             current += ch
             i += 1
             continue
-        if ch == "#" and (not current or current[-1].isspace()
-                          or (current[-1] in ";&|()" and not current.endswith("$("))):
-            # A comment runs to the end of its line. Its text is not shell, so an
-            # apostrophe in it (# don't) must not open a quote. Only a # that starts a
-            # word counts: ${#arr[@]}, $#, ${x##*/}, a#b and url#frag are not comments.
-            newline = command.find("\n", i)
-            i = len(command) if newline < 0 else newline
-            continue
         if command[i:i + 2] in ("&&", "||"):
             segments.append(current)
             current = ""
             i += 2
-            continue
-        if ch == "|" and current.endswith(">"):
-            # >| is the clobbering redirect, not a pipe.
-            current += ch
-            i += 1
             continue
         if ch in ";|\n":
             segments.append(current)
@@ -427,9 +401,7 @@ def cloud_hits(command: str) -> list[str]:
     there is not the segment's first token.
     """
     hits = []
-    # A heredoc body is data, so a docs file with an "az login" line is not a cloud call.
-    # A body fed to a shell is run, and _strip_heredoc_bodies keeps that one.
-    for segment in split_segments(_strip_heredoc_bodies(command)):
+    for segment in split_segments(command):
         # No explicit wrapper skip: the wrapper is not in CLOUD_COMMANDS, so a segment
         # whose command is the wrapper already fails the membership test below.
         if not _parses(segment):
@@ -464,10 +436,6 @@ def cloud_hits(command: str) -> list[str]:
 def is_simple(command: str) -> bool:
     """True when wrapping the whole command in the credential wrapper is safe."""
     if len(split_segments(command)) != 1:
-        return False
-    if "\n" in command.rstrip("\n"):
-        # A comment line counts as no segment, so "# note\naz ..." is one segment, yet
-        # wrapping it would leave the az line outside cloudctx exec.
         return False
     unquoted = _unquoted_text(command)
     for marker in _NOT_SIMPLE:
@@ -645,7 +613,8 @@ _SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
 # A heredoc opener, not a here-string (<<<).
 _HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 # A heredoc opener line that hands the body to a shell, which runs it.
-_SHELL_FED = re.compile(r"(^|[|;&(]\s*)((sudo|env|exec)\s+)?(\S*/)?(bash|sh|zsh|dash|ksh)\b")
+_SHELL_FED = re.compile(r"(^|[\s|;&({])(\S*/)?(bash|sh|zsh|dash|ksh)(?=$|[\s;|&)}])"
+                        r"|(^|[\s|;&({])(source|\.)\s+/dev/stdin\b")
 # Options that take a value, per command, so the value is not read as a path.
 _VALUE_OPTIONS = {
     "touch": {"-t", "-d", "-r"},
@@ -661,7 +630,8 @@ _CHMOD_MODE = re.compile(r"^([ugoa]*[-+=][rwxXstugo]*)+(,([ugoa]*[-+=][rwxXstugo
 # git subcommands that change the working tree or the repository.
 _GIT_WRITES = frozenset({"commit", "checkout", "switch", "reset", "mv", "rm", "add", "restore",
                          "stash", "merge", "rebase", "pull", "apply", "clean", "cherry-pick",
-                         "revert", "am", "fetch", "push"})
+                         "revert", "am", "fetch", "push", "gc", "update-ref",
+                         "prune"})
 _GIT_CLONE_VALUES = {"-b", "--branch", "-o", "--origin", "--depth", "--reference", "-c",
                      "--config", "-j", "--jobs", "-u", "--upload-pack", "--template",
                      "--separate-git-dir", "--filter", "--shallow-since", "--shallow-exclude"}
@@ -677,6 +647,47 @@ def _in_quotes_at(text: str, index: int) -> bool:
         elif ch in "'\"":
             quote = ch
     return bool(quote)
+
+
+def _sw_code_part(line: str) -> str:
+    """One line with its comment cut off and any (( )) arithmetic blanked out, same length
+    up to the cut, so a heredoc opener is looked for only where the shell would see one:
+    not in `# see <<EOF` and not in `$((1<<x))`."""
+    out = list(line)
+    quote = ""
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if quote:
+            if ch == "\\" and quote == '"':
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch == "\\":
+            i += 2
+            continue
+        if ch in "'\"":
+            quote = ch
+            i += 1
+            continue
+        if line.startswith("((", i):
+            depth, j = 0, i
+            while j < len(line):
+                depth += {"(": 1, ")": -1}.get(line[j], 0)
+                if depth == 0:
+                    break
+                j += 1
+            for k in range(i, min(j + 1, len(line))):
+                out[k] = " "
+            i = j + 1
+            continue
+        if ch == "#" and (i == 0 or line[i - 1].isspace() or line[i - 1] in ";&|()"):
+            return "".join(out[:i])
+        i += 1
+    return "".join(out)
 
 
 def _strip_heredoc_bodies(command: str) -> str:
@@ -698,11 +709,94 @@ def _strip_heredoc_bodies(command: str) -> str:
                 out.append(line)
             continue
         out.append(line)
-        executed = bool(_SHELL_FED.search(_unquoted_text(line)))
-        for match in _HEREDOC.finditer(line):
-            if not _in_quotes_at(line, match.start()):
+        code = _sw_code_part(line)
+        executed = bool(_SHELL_FED.search(_unquoted_text(code)))
+        for match in _HEREDOC.finditer(code):
+            if not _in_quotes_at(code, match.start()):
                 pending.append((match.group(2), match.group(0)[2:3] == "-", executed))
     return "\n".join(out)
+
+
+def _sw_split_segments(command: str) -> list[str]:
+    """The shell-write check's own splitter: split_segments plus comments, escapes and >|.
+
+    Kept apart from split_segments on purpose. The cloud check's behaviour is frozen (see
+    tests/test_cloud_frozen.py), and every change to a splitter it shares reopened a bare
+    cloud call somewhere, so the write side parses on its own and a miss here is only a
+    missed write.
+    """
+    # A backslash-newline is a line continuation, not a separator. Splitting on the raw
+    # newline instead cuts a single command in half and hides its command name.
+    command = command.replace("\\\n", " ")
+    segments: list[str] = []
+    current = ""
+    quote = ""
+    braces = 0  # open ${ ... }, where a # is part of the expansion
+    backtick = False  # inside `...`, where a # comment ends at the closing backtick
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if quote == "'":
+            current += ch
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch == "\\":
+            # An escaped character is literal, in or out of double quotes: echo it\'s
+            # opens no quote, and a quote that is never opened cannot swallow the lines
+            # after it.
+            current += command[i:i + 2]
+            i += 2
+            continue
+        if quote:
+            current += ch
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+            current += ch
+            i += 1
+            continue
+        if command.startswith("${", i):
+            braces += 1
+            current += "${"
+            i += 2
+            continue
+        if ch == "}" and braces:
+            braces -= 1
+        if ch == "`":
+            backtick = not backtick
+        if ch == "#" and not braces and not backtick and (
+                not current or current[-1].isspace()
+                or (current[-1] in ";&|()" and not current.endswith("$("))):
+            # A comment runs to the end of its line. Its text is not shell, so an
+            # apostrophe in it (# don't) must not open a quote. Only a # that starts a
+            # word counts: ${#arr[@]}, $#, ${x##*/}, a#b and url#frag are not comments.
+            newline = command.find("\n", i)
+            i = len(command) if newline < 0 else newline
+            continue
+        if command[i:i + 2] in ("&&", "||"):
+            segments.append(current)
+            current = ""
+            i += 2
+            continue
+        if ch == "|" and current.endswith(">"):
+            # >| is the clobbering redirect, not a pipe.
+            current += ch
+            i += 1
+            continue
+        if ch in ";|\n":
+            segments.append(current)
+            current = ""
+            i += 1
+            continue
+        current += ch
+        i += 1
+    segments.append(current)
+    return [s.strip() for s in segments if s.strip()]
 
 
 def _closing(text: str, start: int) -> int:
@@ -745,7 +839,7 @@ def _shell_words(text: str):
     rest of its line only. None when a quote is never closed.
     """
     words: list[tuple[str, str, bool]] = []
-    state = {"current": "", "started": False, "quoted": False}
+    state = {"current": "", "started": False, "quoted": False, "tick": False}
 
     def flush():
         if state["started"]:
@@ -795,6 +889,12 @@ def _shell_words(text: str):
             add(buf, True)
             i = j + 1
             continue
+        if text.startswith("${", i):
+            close = text.find("}", i + 2)
+            close = n - 1 if close < 0 else close
+            add(text[i:close + 1])
+            i = close + 1
+            continue
         if ch == "\\":
             if text[i + 1:i + 2] == "\n":
                 i += 2
@@ -814,11 +914,14 @@ def _shell_words(text: str):
         if ch == "`" or text.startswith("$(", i):
             flush()
             words.append(("op", "`" if ch == "`" else "(", False))
+            if ch == "`":
+                state["tick"] = not state.get("tick")
             i += 1 if ch == "`" else 2
             continue
         if ch == "#" and not state["started"]:
-            newline = text.find("\n", i)
-            i = n if newline < 0 else newline
+            ends = [e for e in (text.find("\n", i), text.find("`", i) if state.get("tick") else -1)
+                    if e >= 0]
+            i = min(ends) if ends else n
             continue
         op = next((o for o in _OPERATORS if text.startswith(o, i)), None)
         if op:
@@ -1128,7 +1231,7 @@ def _git_targets(args: list, cwd: str) -> list:
     if sub == "mv":
         paths = [_expand(p[0], p[1], repo) for p in _positionals(rest, set())]
         return [(p, False) for p in paths if p] or [(repo, False)]
-    if sub in ("stash", "apply", "tag", "branch", "config", "worktree"):
+    if sub in ("stash", "apply", "tag", "branch", "config", "worktree", "remote", "notes"):
         return _git_subcommand_targets(sub, rest, repo)
     if sub in _GIT_WRITES:
         return [(repo, False)]
@@ -1141,6 +1244,13 @@ def _git_subcommand_targets(sub: str, rest: list, repo: str) -> list:
     write = [(repo, False)]
     if sub == "stash":
         return [] if flags and flags[0] in ("list", "show") else write
+    if sub == "remote":
+        changes = {"add", "set-url", "remove", "rm", "rename", "set-head", "set-branches",
+                   "prune", "update"}
+        return write if flags and flags[0] in changes else []
+    if sub == "notes":
+        changes = {"add", "append", "edit", "remove", "copy", "merge", "prune"}
+        return write if flags and flags[0] in changes else []
     if sub == "apply":
         checks = {"--check", "--stat", "--numstat", "--summary"}
         return [] if checks & set(flags) and "--apply" not in flags else write
@@ -1346,7 +1456,7 @@ def _shell_write_paths(command: str, state: dict, depth: int = 0) -> list[str]:
     # outlive it, so the directory state is saved on the way in and restored on the
     # way out.
     frames: list[tuple[str, dict]] = []
-    for segment in split_segments(_strip_heredoc_bodies(command)):
+    for segment in _sw_split_segments(_strip_heredoc_bodies(command)):
         words = _shell_words(segment)
         if words is None:
             continue

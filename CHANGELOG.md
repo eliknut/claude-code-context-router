@@ -14,16 +14,20 @@
   The deny wins over a cloud rewrite, and `#noctx` does not bypass it. A fault in this parser
   skips only the shell-write check, never the cloud check. Not caught: `python -c`, `eval`,
   `xargs`, scripts, shell functions and paths in variables.
-- Command splitting now knows comments and backslash escapes, so an apostrophe in a comment
-  (`# don't`) or an escaped quote no longer hides the lines after it, and `>|` is read as a
-  redirect rather than a pipe. A command that spans several lines is never rewritten by the
-  cloud check as a whole; it is denied with the scoped form instead. Only a `#` that starts a
-  word is a comment, so `${#arr[@]}`, `$#`, `${x##*/}` and `a#b` are read as shell.
-- The cloud check skips heredoc bodies, so writing a doc with an `az login` line is no longer
-  denied. A body fed to a shell (`bash <<EOF`, `cat <<EOF | sh`) is still checked.
+- The shell-write check has its own splitter and tokenizer. It knows comments and backslash
+  escapes, so an apostrophe in a comment (`# don't`) or an escaped quote does not hide the
+  lines after it, and `>|` is a redirect, not a pipe. Only a `#` that starts a word is a
+  comment, so `${#arr[@]}`, `$#`, `${x##*/}`, `${x:- #}`, `a#b` and a `#` inside backticks are
+  read as shell. A heredoc body written to a file is data; one fed to a shell (`bash <<EOF`,
+  `time bash`, `sudo -u root bash`, `{ bash; }`, `cat <<EOF | sh`, `source /dev/stdin`) is
+  scanned. A `<<` in a comment or in `$(( ))` arithmetic opens no heredoc.
 - More git in the shell-write check: `fetch`, `push`, `tag`, `branch` with a name or `-d`,
-  `config` that sets a value, `worktree add` and `remove`, `--git-dir` and `--work-tree`; and
-  `env -C DIR`. `git stash list`, `git apply --check` and `patch --dry-run` stay reads.
+  `config` that sets a value, `worktree add` and `remove`, `remote add` and `set-url`, `gc`,
+  `update-ref`, `notes add`, `prune`, `--git-dir` and `--work-tree`; and `env -C DIR`.
+  `git stash list`, `git apply --check`, `git remote -v` and `patch --dry-run` stay reads.
+- The cloud check is unchanged from 2.0.1. `tests/test_cloud_frozen.py` compares its decision
+  with a vendored copy of the 2.0.1 guard (`tests/fixtures/guard_2_0_1.py`) over a corpus of
+  more than 150 awkward commands, so a change to it fails the tests.
 - `guard.decide()` takes a `cwd` keyword; the hook passes the input's `cwd` field.
 
 ## 2.0.1

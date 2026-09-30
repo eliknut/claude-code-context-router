@@ -149,14 +149,16 @@ and `Task` call. It does three checks:
   `patch`, git subcommands that write (`commit`, `checkout`, `reset`, `pull`, `fetch`, `push`,
   `tag`, `branch -d`, `config key value`, `worktree add`, `mv`, `clone` and others; the repo,
   `-C DIR`, `--git-dir` or `--work-tree` counts as the target), `env -C DIR`, `find -delete` and
-  `find -exec`, a heredoc fed to a shell (`bash <<EOF`), and the
+  `find -exec`, a heredoc fed to a shell (`bash <<EOF`, `cat <<EOF | sudo bash`,
+  `source /dev/stdin <<EOF`), and the
   same inside `bash -c '...'` and `$(...)`, quoted or not. Relative paths resolve against the
   session's working directory and any `cd`, `pushd` or `popd` earlier in the command (a `cd`
   inside `( ... )` ends with the subshell); `~`, `$HOME` and `$PWD` are expanded. Reads (`cat`,
   `grep`, `diff`, `<`, read-only git such as `git -C DIR status`, `log`, `diff`, `stash list`,
   `branch`, `tag -l` or `apply --check`, and `patch --dry-run`) are not flagged, and a heredoc
-  body written to a file is data, so neither check reads it as commands. There is no `#noctx` for writes, this deny wins over a cloud rewrite, and a fault in
-  this parser skips only this check, never the cloud check.
+  body written to a file is data to this check. There is no `#noctx` for writes, this deny wins
+  over a cloud rewrite, and a fault in this parser skips only this check, never the cloud check.
+  The write check parses on its own; it shares no splitter with the cloud check.
 - **Cloud check.** A bare `az`, `aws`, `terraform` or `terragrunt` call that is one plain command
   is rewritten to `cloudctx exec <scope> -- <command>`. Anything it cannot rewrite safely is denied
   with the scoped form to use instead: pipes, `&&`, substitutions, redirects, a leading

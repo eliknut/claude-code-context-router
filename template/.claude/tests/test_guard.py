@@ -1032,13 +1032,13 @@ class ShellWriteRoundTwoTests(TreeFixture, unittest.TestCase):
                             self.root, self.memory, cwd=str(self.root))
 
     # 1. A # that does not start a word is not a comment.
-    def test_hash_inside_a_word_is_not_a_comment_to_the_splitter(self):
+    def test_hash_inside_a_word_is_not_a_comment_to_the_write_splitter(self):
         for command in ("echo ${#arr[@]}; az group list", "echo $#; az group list",
                         "[[ $x == *#* ]]; az group list", "echo a#b; az group list",
                         "curl https://x/#frag; az group list", "echo ${x#prefix}; az group list",
                         "echo ${x##*/}; az group list"):
             with self.subTest(command=command):
-                self.assertEqual(len(guard.split_segments(command)), 2, command)
+                self.assertEqual(len(guard._sw_split_segments(command)), 2, command)
 
     def test_a_cloud_call_after_a_parameter_expansion_is_not_let_through(self):
         self.assertEqual(self.cloud("echo ${#arr[@]}; az group delete -n rg --yes").action, "deny")
@@ -1050,7 +1050,7 @@ class ShellWriteRoundTwoTests(TreeFixture, unittest.TestCase):
                            "echo ${x##*/} > ../globex/f")
 
     def test_a_hash_after_an_operator_is_still_a_comment(self):
-        self.assertEqual(guard.split_segments("ls;# it's\naz group list"), ["ls", "az group list"])
+        self.assertEqual(guard._sw_split_segments("ls;# it's\naz group list"), ["ls", "az group list"])
 
     # 2. A trailing newline alone does not block the rewrite.
     def test_a_trailing_newline_is_still_rewritten(self):
@@ -1058,12 +1058,13 @@ class ShellWriteRoundTwoTests(TreeFixture, unittest.TestCase):
         self.assertEqual(d.action, "update")
         self.assertTrue(d.updated_input["command"].startswith("cloudctx exec globex -- az"))
 
-    # 3. Heredoc bodies are data to the cloud check, unless a shell runs them.
-    def test_a_heredoc_body_mentioning_a_cloud_cli_is_not_a_cloud_call(self):
-        for command in ("cat > /tmp/n.md <<EOF\naz login\nEOF",
-                        "cat > /tmp/n.md <<'EOF'\naz login\nterraform plan\nEOF"):
+    # 3. Changed in round 3: the cloud check is frozen at 2.0.1, which denies a heredoc
+    # body line that starts with a cloud CLI even when the body is only written to a
+    # file. Kept as the 2.0.1 answer on purpose; the write check reads the body as data.
+    def test_a_heredoc_body_mentioning_a_cloud_cli_keeps_the_2_0_1_cloud_answer(self):
+        for command in ("cat > /tmp/n.md <<'EOF'\naz login\nterraform plan\nEOF",):
             with self.subTest(command=command):
-                self.assertEqual(self.cloud(command).action, "allow")
+                self.assertEqual(self.cloud(command).action, "deny")
 
     def test_a_heredoc_fed_to_a_shell_is_still_checked(self):
         for command in ("cat <<EOF | bash\naz login\nEOF", "bash <<EOF\naz login\nEOF"):
@@ -1100,6 +1101,56 @@ class ShellWriteRoundTwoTests(TreeFixture, unittest.TestCase):
 
     def test_find_exec_bash_c_is_read(self):
         self.assert_denied("find . -name x -exec bash -c 'cp \"$1\" ../globex/' _ {} \\;")
+
+
+class ShellWriteRoundThreeTests(TreeFixture, unittest.TestCase):
+    """Third review round, write side only: the cloud side is pinned by test_cloud_frozen."""
+
+    def decide(self, command, cwd=None):
+        return guard.decide("Bash", {"command": command}, "acme", REG, self.root,
+                            self.memory, cwd=str(cwd or self.root / "clients/acme"))
+
+    def assert_denied(self, *commands):
+        for command in commands:
+            with self.subTest(command=command):
+                d = self.decide(command)
+                self.assertEqual(d.action, "deny", command)
+                self.assertIn("'globex'", d.reason)
+
+    def assert_allowed(self, *commands, cwd=None):
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(self.decide(command, cwd).action, "allow", command)
+
+    def test_a_heredoc_opener_in_a_comment_or_arithmetic_is_not_one(self):
+        self.assert_denied("# see <<EOF\ntouch ../globex/f", "echo $((1<<x))\ntouch ../globex/f",
+                           "(( y = 1<<x ))\ntouch ../globex/f", "echo x # <<EOF\ntouch ../globex/f")
+
+    def test_a_heredoc_body_fed_to_any_shell_is_scanned(self):
+        body = "\ntouch ../globex/f\nEOF"
+        self.assert_denied("time bash <<EOF" + body, "nohup bash <<EOF" + body,
+                           "command bash <<EOF" + body, "env bash <<EOF" + body,
+                           "sudo -u root bash <<EOF" + body, "{ bash; } <<EOF" + body,
+                           "if true; then bash <<EOF" + body + "\nfi", "cat <<EOF | sudo -E bash" + body,
+                           "source /dev/stdin <<EOF" + body, ". /dev/stdin <<EOF" + body,
+                           "/usr/bin/env bash <<EOF" + body, "cat <<EOF|sh" + body)
+
+    def test_a_heredoc_body_written_to_a_file_is_still_data(self):
+        self.assert_allowed("cat > notes.md <<EOF\ntouch ../globex/f\nEOF",
+                            "cat > run.sh <<EOF\nrm ../globex/f\nEOF")
+
+    def test_hash_in_an_expansion_or_backticks_is_not_a_comment(self):
+        self.assert_denied("echo ${x:- #}; touch ../globex/f", "echo `echo #`; touch ../globex/f",
+                           "echo ${x:- #} > ../globex/f")
+
+    def test_more_git_writes_are_denied(self):
+        self.assert_denied("git -C ../globex remote add x https://x", "git -C ../globex remote set-url o u",
+                           "git -C ../globex gc", "git -C ../globex update-ref HEAD abc",
+                           "git -C ../globex notes add -m x", "git -C ../globex prune")
+
+    def test_git_remote_and_notes_reads_are_allowed(self):
+        self.assert_allowed("git remote -v", "git remote", "git remote show origin", "git notes list",
+                            "git notes show", cwd=self.root / "clients/globex")
 
 
 if __name__ == "__main__":

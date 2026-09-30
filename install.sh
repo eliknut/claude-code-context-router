@@ -222,6 +222,9 @@ KIT_OWNED=(
   .claude/tests/test_handoff.py
   .claude/tests/test_guard.py
   .claude/tests/test_context_guard.py
+  .claude/tests/test_cloud_frozen.py
+  .claude/tests/fixtures/guard_2_0_1.py
+  .claude/tests/fixtures/cloud_corpus.json
 )
 
 # destination|source under template/
