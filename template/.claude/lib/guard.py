@@ -230,6 +230,19 @@ def split_segments(command: str) -> list[str]:
     i = 0
     while i < len(command):
         ch = command[i]
+        if quote == "'":
+            current += ch
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch == "\\":
+            # An escaped character is literal, in or out of double quotes: echo it\'s
+            # opens no quote, and a quote that is never opened cannot swallow the lines
+            # after it.
+            current += command[i:i + 2]
+            i += 2
+            continue
         if quote:
             current += ch
             if ch == quote:
@@ -241,10 +254,21 @@ def split_segments(command: str) -> list[str]:
             current += ch
             i += 1
             continue
+        if ch == "#" and (not current or current[-1].isspace() or current[-1] in "(){}"):
+            # A comment runs to the end of its line. Its text is not shell, so an
+            # apostrophe in it (# don't) must not open a quote.
+            newline = command.find("\n", i)
+            i = len(command) if newline < 0 else newline
+            continue
         if command[i:i + 2] in ("&&", "||"):
             segments.append(current)
             current = ""
             i += 2
+            continue
+        if ch == "|" and current.endswith(">"):
+            # >| is the clobbering redirect, not a pipe.
+            current += ch
+            i += 1
             continue
         if ch in ";|\n":
             segments.append(current)
@@ -437,6 +461,10 @@ def is_simple(command: str) -> bool:
     """True when wrapping the whole command in the credential wrapper is safe."""
     if len(split_segments(command)) != 1:
         return False
+    if "\n" in command:
+        # A comment line counts as no segment, so "# note\naz ..." is one segment, yet
+        # wrapping it would leave the az line outside cloudctx exec.
+        return False
     unquoted = _unquoted_text(command)
     for marker in _NOT_SIMPLE:
         haystack = unquoted if marker in _UNQUOTED_ONLY else command
@@ -579,10 +607,12 @@ def _decide_write(tool_name: str, tool_input: dict, active: str, reg: dict,
 # The shell-write check: the write check above, applied to the paths a Bash command
 # writes. Best effort by design. It reads the shapes a session actually emits
 # (redirects, tee, cp, mv, install, rsync, ln, sed -i, perl -i, rm, touch, mkdir,
-# truncate, chmod, dd of=, and bash -c / sh -c strings) and not what a program does once
-# it runs: python -c, node -e, eval, xargs, a script file or a variable holding the path
-# all go unseen. A path it cannot resolve (an unexpanded $VAR) is skipped, not denied.
-# There is no escape hatch, on purpose: a write into another context is never the fix.
+# truncate, chmod, dd of=, curl -o, wget, tar -x, unzip, sort -o, patch, git write
+# subcommands, find -exec and -delete, and bash -c / sh -c strings) and not what a
+# program does once it runs: python -c, node -e, eval, xargs, a script file or a
+# variable holding the path all go unseen. A path it cannot resolve (an unexpanded
+# $VAR) is skipped, not denied. There is no escape hatch, on purpose: a write into
+# another context is never the fix.
 
 # Operators whose next word is written. "<>" opens the file read-write, so it counts.
 _WRITE_REDIRECTS = frozenset({">", ">>", ">|", "&>", "&>>", "<>"})
@@ -593,9 +623,20 @@ _OPERATORS = ("&>>", "<<<", "<<-", "&&", "||", "|&", ";;", ">>", ">|", "&>", ">&
               "<&", "<>", ">", "<", "|", "&", ";", "(", ")")
 # Operators after which the shell starts a fresh simple command.
 _COMMAND_BREAKS = frozenset({"&&", "||", "|", "|&", "&", ";", ";;", "(", ")", "`"})
-# Words that precede the command that actually runs.
-_WRITE_WRAPPERS = frozenset({"sudo", "env", "nohup", "command", "exec", "time", "nice",
-                             "then", "do", "else", "if", "while", "until", "!", "{"})
+# Words that precede the command that actually runs, with the options of each that take
+# a value, so `sudo -u root cp ...` reads cp and not root as the command.
+_WRAPPER_VALUE_OPTIONS = {
+    "sudo": {"-u", "-g", "-C", "-D", "-h", "-p", "-U", "-r", "-t", "-T"},
+    "env": {"-u", "-C", "-S", "--unset", "--chdir"},
+    "nice": {"-n", "--adjustment"},
+    "ionice": {"-c", "-n", "-p", "--class", "--classdata"},
+    "timeout": {"-s", "-k", "--signal", "--kill-after"},
+    "stdbuf": {"-i", "-o", "-e", "--input", "--output", "--error"},
+    "exec": {"-a"},
+    "nohup": set(), "command": set(), "time": set(),
+}
+_WRITE_WRAPPERS = frozenset(_WRAPPER_VALUE_OPTIONS) | {
+    "then", "do", "else", "elif", "if", "while", "until", "!", "{"}
 _SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
 # A heredoc opener, not a here-string (<<<).
 _HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
@@ -607,8 +648,17 @@ _VALUE_OPTIONS = {
     "install": {"-m", "-o", "-g", "-S"},
     "cp": {"-S"}, "mv": {"-S"}, "ln": {"-S"},
 }
-_PATH_COMMANDS = frozenset({"rm", "rmdir", "unlink", "touch", "mkdir", "truncate", "chmod"})
+_PATH_COMMANDS = frozenset({"rm", "rmdir", "unlink", "touch", "mkdir", "truncate"})
 _COPY_COMMANDS = frozenset({"cp", "mv", "install", "rsync", "ln"})
+# chmod: a leading -rwx style word is a mode, not an option.
+_CHMOD_MODE = re.compile(r"^([ugoa]*[-+=][rwxXstugo]*)+(,([ugoa]*[-+=][rwxXstugo]*)+)*$|^[0-7]{1,4}$")
+# git subcommands that change the working tree or the repository.
+_GIT_WRITES = frozenset({"commit", "checkout", "switch", "reset", "mv", "rm", "add", "restore",
+                         "stash", "merge", "rebase", "pull", "apply", "clean", "cherry-pick",
+                         "revert", "am"})
+_GIT_CLONE_VALUES = {"-b", "--branch", "-o", "--origin", "--depth", "--reference", "-c",
+                     "--config", "-j", "--jobs", "-u", "--upload-pack", "--template",
+                     "--separate-git-dir", "--filter", "--shallow-since", "--shallow-exclude"}
 
 
 def _in_quotes_at(text: str, index: int) -> bool:
@@ -645,13 +695,44 @@ def _strip_heredoc_bodies(command: str) -> str:
     return "\n".join(out)
 
 
+def _closing(text: str, start: int) -> int:
+    """Index of the ")" closing the "$(" whose body starts at `start`, or len(text)."""
+    depth = 1
+    quote = ""
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\" and quote == '"':
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return len(text)
+
+
 def _shell_words(text: str):
-    """One segment as tokens: ("w", word, starts_quoted) or ("op", operator, False).
+    """One segment as tokens: ("w", word, starts_quoted), ("op", operator, False), or
+    ("sub", command, False) for a $( ) or backtick substitution inside double quotes.
 
     Quote-aware, so `echo "a > b"` is one word and no redirect. A digit glued to a
-    redirect (2>, 1>>) is its file descriptor and is dropped. $( and a backtick become
-    a break, so the command inside is read as a command of its own. None when a quote
-    is never closed, since the shell refuses such a line anyway.
+    redirect (2>, 1>>) is its file descriptor and is dropped. An unquoted $( or backtick
+    becomes a break, so the command inside is read as a command of its own; inside double
+    quotes the substitution is still live, so its body is returned as a "sub" token. An
+    unquoted newline ends a command and an unquoted # at a word start comments out the
+    rest of its line only. None when a quote is never closed.
     """
     words: list[tuple[str, str, bool]] = []
     state = {"current": "", "started": False, "quoted": False}
@@ -684,6 +765,19 @@ def _shell_words(text: str):
                     buf += text[j + 1]
                     j += 2
                     continue
+                if text.startswith("$(", j):
+                    close = _closing(text, j + 2)
+                    words.append(("sub", text[j + 2:close], False))
+                    buf += text[j:close + 1]
+                    j = close + 1
+                    continue
+                if text[j] == "`":
+                    close = text.find("`", j + 1)
+                    close = n if close < 0 else close
+                    words.append(("sub", text[j + 1:close], False))
+                    buf += text[j:close + 1]
+                    j = close + 1
+                    continue
                 buf += text[j]
                 j += 1
             if j >= n:
@@ -692,8 +786,16 @@ def _shell_words(text: str):
             i = j + 1
             continue
         if ch == "\\":
+            if text[i + 1:i + 2] == "\n":
+                i += 2
+                continue
             add(text[i + 1:i + 2])
             i += 2
+            continue
+        if ch == "\n":
+            flush()
+            words.append(("op", ";", False))
+            i += 1
             continue
         if ch.isspace():
             flush()
@@ -705,7 +807,9 @@ def _shell_words(text: str):
             i += 1 if ch == "`" else 2
             continue
         if ch == "#" and not state["started"]:
-            break
+            newline = text.find("\n", i)
+            i = n if newline < 0 else newline
+            continue
         op = next((o for o in _OPERATORS if text.startswith(o, i)), None)
         if op:
             if (op[0] in "<>" and state["started"] and not state["quoted"]
@@ -724,11 +828,12 @@ def _shell_words(text: str):
 def _expand(word: str, starts_quoted: bool, cwd: str) -> str:
     """The absolute path a word names, or "" when it cannot be known.
 
-    ~ and $HOME are expanded; any other $VAR means the path is unknown and is skipped.
-    A glob is reduced to its literal directory prefix, which is what it can reach.
+    ~, $HOME and $PWD are expanded; any other $VAR means the path is unknown and is
+    skipped. A glob is reduced to its literal directory prefix, which is what it can reach.
     """
     home = os.path.expanduser("~")
     word = re.sub(r"\$\{HOME\}|\$HOME(?![A-Za-z0-9_])", lambda _m: home, word)
+    word = re.sub(r"\$\{PWD\}|\$PWD(?![A-Za-z0-9_])", lambda _m: cwd, word)
     if word.startswith("~") and not starts_quoted:
         word = os.path.expanduser(word)
     if "$" in word:
@@ -763,16 +868,62 @@ def _positionals(args: list, value_options: set) -> list:
     return out
 
 
+def _short_options(args: list, value_letters: str) -> list:
+    """(letter, value) for each short option in `args`, value None for a flag.
+
+    A letter in `value_letters` takes the rest of its cluster, or the next word, as its
+    value, so `-sSo out` and `-oout` both give ("o", "out").
+    """
+    out = []
+    index = 0
+    while index < len(args):
+        text = args[index][0]
+        if text == "--":
+            break
+        if text.startswith("-") and not text.startswith("--") and len(text) > 1:
+            for position, letter in enumerate(text[1:]):
+                if letter in value_letters:
+                    rest = text[2 + position:]
+                    if rest:
+                        out.append((letter, (rest, args[index][1])))
+                    elif index + 1 < len(args):
+                        out.append((letter, args[index + 1]))
+                        index += 1
+                    break
+                out.append((letter, None))
+        index += 1
+    return out
+
+
+def _long_values(args: list, names: set) -> list:
+    """The values of the long options in `names`, spelled --name=value or --name value."""
+    out = []
+    for index, (text, quoted) in enumerate(args):
+        name, eq, value = text.partition("=")
+        if name in names:
+            if eq:
+                out.append((value, quoted))
+            elif index + 1 < len(args):
+                out.append(args[index + 1])
+    return out
+
+
 def _copy_destinations(cmd: str, args: list) -> list:
     """The destination of cp, mv, install, rsync or ln, plus the sources mv removes."""
     if cmd != "rsync":
         for index, (text, quoted) in enumerate(args):
+            dest, used = None, 1
             if text in ("-t", "--target-directory") and index + 1 < len(args):
-                return [args[index + 1]]
-            if text.startswith("--target-directory="):
-                return [(text.split("=", 1)[1], quoted)]
-            if text.startswith("-t") and not text.startswith("--") and len(text) > 2:
-                return [(text[2:], quoted)]
+                dest, used = args[index + 1], 2
+            elif text.startswith("--target-directory="):
+                dest = (text.split("=", 1)[1], quoted)
+            elif text.startswith("-t") and not text.startswith("--") and len(text) > 2:
+                dest = (text[2:], quoted)
+            if dest:
+                if cmd != "mv":
+                    return [dest]
+                rest = args[:index] + args[index + used:]
+                return [dest] + _positionals(rest, _VALUE_OPTIONS["mv"])
     positionals = _positionals(args, _VALUE_OPTIONS.get(cmd, set()))
     if cmd == "rsync":
         # host:path is a remote end, not a local path.
@@ -828,8 +979,193 @@ def _in_place_files(cmd: str, args: list) -> list:
     return positionals if script_given else positionals[1:]
 
 
-def _simple_command_writes(words: list, cwd: str, depth: int):
-    """The (word, starts_quoted) targets one simple command writes, and the cwd after it."""
+def _chmod_paths(args: list) -> list:
+    """The paths chmod changes: every argument after the mode that is not an option."""
+    by_reference = any(a[0].startswith("--reference") for a in args)
+    mode_seen = by_reference
+    paths = []
+    options_done = False
+    for word in args:
+        text = word[0]
+        if not options_done and text == "--":
+            options_done = True
+            continue
+        if not mode_seen:
+            if options_done or not text.startswith("-") or _CHMOD_MODE.match(text):
+                mode_seen = True
+            continue
+        if not options_done and text.startswith("-") and not _CHMOD_MODE.match(text):
+            continue
+        paths.append(word)
+    return paths
+
+
+def _download_targets(cmd: str, args: list) -> list:
+    """Where curl, wget, sort, unzip, tar or patch write."""
+    if cmd == "curl":
+        opts = _short_options(args, "oHXduAebcxTFKmwrECYyzUQPt")
+        out = [v for letter, v in opts if letter == "o" and v]
+        out += _long_values(args, {"--output"})
+        remote = any(letter == "O" for letter, _v in opts) or any(
+            a[0] in ("--remote-name", "--remote-name-all") for a in args)
+        if remote:
+            out += _long_values(args, {"--output-dir"}) or [(".", False)]
+    elif cmd == "wget":
+        opts = _short_options(args, "OPoaeUtTwQlADRIXBi")
+        documents = [v for letter, v in opts if letter == "O" and v]
+        documents += _long_values(args, {"--output-document"})
+        out = documents + [v for letter, v in opts if letter in "oa" and v]
+        out += _long_values(args, {"--output-file", "--append-output"})
+        if not documents:
+            out += ([v for letter, v in opts if letter == "P" and v]
+                    + _long_values(args, {"--directory-prefix"})) or [(".", False)]
+    elif cmd == "sort":
+        out = [v for letter, v in _short_options(args, "oktST") if letter == "o" and v]
+        out += _long_values(args, {"--output"})
+    elif cmd == "unzip":
+        opts = _short_options(args, "dx")
+        if any(letter in "ltZvpz" for letter, _v in opts):
+            return []
+        out = [v for letter, v in opts if letter == "d" and v] or [(".", False)]
+    elif cmd == "tar":
+        return _tar_targets(args)
+    elif cmd == "patch":
+        opts = _short_options(args, "pidorBzDFVYg")
+        out = [v for letter, v in opts if letter == "o" and v]
+        out += _long_values(args, {"--output"})
+        if not out:
+            base = ([v for letter, v in opts if letter == "d" and v]
+                    + _long_values(args, {"--directory"}))
+            files = _positionals(args, {"-p", "-i", "-d", "-o", "-r", "-B", "-z", "-D",
+                                        "-F", "-V", "-Y", "-g"})
+            if files:
+                prefix = base[0][0] if base else ""
+                out = [(os.path.join(prefix, files[0][0]), files[0][1])]
+            else:
+                out = base or [(".", False)]
+    else:
+        return []
+    return [v for v in out if v[0] != "-"]
+
+
+def _tar_targets(args: list) -> list:
+    """The directory tar extracts into, or the archive it creates."""
+    bundle = args[0][0] if args and not args[0][0].startswith("-") else ""
+    clusters = [a[0][1:] for a in args if a[0].startswith("-") and not a[0].startswith("--")]
+    flags = bundle + "".join(clusters)
+    longs = {a[0].split("=", 1)[0] for a in args if a[0].startswith("--")}
+    if "x" in flags or longs & {"--extract", "--get"}:
+        directory = [v for letter, v in _short_options(args, "Cf") if letter == "C" and v]
+        directory += _long_values(args, {"--directory"})
+        return directory[:1] or [(".", False)]
+    if set("cru") & set(flags) or longs & {"--create", "--append", "--update"}:
+        archive = _long_values(args, {"--file"})
+        archive += [v for letter, v in _short_options(args, "fCb") if letter == "f" and v]
+        if not archive and "f" in bundle and len(args) > 1:
+            archive = [args[1]]
+        return [a for a in archive[:1] if a[0] != "-"]
+    return []
+
+
+def _git_targets(args: list, cwd: str) -> list:
+    """What a git command writes: the repository for a write subcommand, the paths of
+    git mv, the destination of git clone. Read subcommands write nothing."""
+    repo = cwd
+    index = 0
+    while index < len(args):
+        text = args[index][0]
+        if text == "-C" and index + 1 < len(args):
+            repo = _expand(args[index + 1][0], args[index + 1][1], repo)
+            if not repo:
+                return []
+            index += 2
+            continue
+        if text in ("-c", "--git-dir", "--work-tree", "--namespace") and index + 1 < len(args):
+            index += 2
+            continue
+        if text.startswith("-"):
+            index += 1
+            continue
+        break
+    if index >= len(args):
+        return []
+    sub, rest = args[index][0], args[index + 1:]
+    if sub == "clone":
+        positionals = _positionals(rest, _GIT_CLONE_VALUES)
+        if len(positionals) >= 2:
+            dest = positionals[1]
+        elif positionals:
+            name = re.split(r"[/:]", positionals[0][0].rstrip("/"))[-1]
+            dest = (name[:-4] if name.endswith(".git") else name, False)
+        else:
+            return []
+        path = _expand(dest[0], dest[1], repo)
+        return [(path, False)] if path else []
+    if sub == "mv":
+        paths = [_expand(p[0], p[1], repo) for p in _positionals(rest, set())]
+        return [(p, False) for p in paths if p] or [(repo, False)]
+    if sub in _GIT_WRITES:
+        return [(repo, False)]
+    return []
+
+
+def _find_targets(args: list, state: dict, depth: int) -> list:
+    """find -delete removes under its start paths; find -exec runs a command per file."""
+    starts = []
+    index = 0
+    while index < len(args) and not args[index][0].startswith(("-", "(", "!")):
+        starts.append(args[index])
+        index += 1
+    starts = starts or [(".", False)]
+    targets = []
+    rest = args[index:]
+    index = 0
+    while index < len(rest):
+        text = rest[index][0]
+        if text == "-delete":
+            targets.extend(starts)
+        elif text in ("-fprint", "-fprint0", "-fprintf", "-fls") and index + 1 < len(rest):
+            targets.append(rest[index + 1])
+            index += 1
+        elif text in ("-exec", "-execdir", "-ok", "-okdir"):
+            end = index + 1
+            while end < len(rest) and rest[end][0] not in (";", "+"):
+                end += 1
+            command = rest[index + 1:end]
+            # {} stands for each file found, which lies under a start path.
+            for start in starts:
+                words = [("w", w[0].replace("{}", start[0]), w[1] and "{}" not in w[0])
+                         for w in command]
+                targets.extend(_simple_command_writes(words, dict(state), depth + 1))
+            index = end
+        index += 1
+    return targets
+
+
+def _change_directory(cmd: str, args: list, state: dict) -> None:
+    """Track cd, pushd and popd in `state`, best effort."""
+    cwd = state["cwd"]
+    if cmd == "popd":
+        if state["dirs"]:
+            state["old"], state["cwd"] = cwd, state["dirs"].pop()
+        return
+    dest = [a for a in args if not a[0].startswith("-") or a[0] == "-"]
+    if dest and dest[0][0] == "-":
+        new = state.get("old") or cwd
+    elif dest:
+        new = _expand(dest[0][0], dest[0][1], cwd)
+    else:
+        new = os.path.expanduser("~")
+    if not new:
+        return
+    if cmd == "pushd":
+        state["dirs"].append(cwd)
+    state["old"], state["cwd"] = cwd, new
+
+
+def _simple_command_writes(words: list, state: dict, depth: int) -> list:
+    """The (word, starts_quoted) targets one simple command writes. A cd, pushd or popd
+    updates `state` for the commands after it."""
     targets = []
     argv = []
     index = 0
@@ -854,59 +1190,104 @@ def _simple_command_writes(words: list, cwd: str, depth: int):
         argv.append((text, quoted))
         index += 1
 
-    while argv and (_ASSIGNMENT.match(argv[0][0]) or argv[0][0] in _WRITE_WRAPPERS):
-        wrapper = argv.pop(0)[0]
-        if wrapper in ("sudo", "env", "nice"):
-            while argv and argv[0][0].startswith("-"):
+    while argv:
+        word = argv[0][0]
+        if _ASSIGNMENT.match(word):
+            argv.pop(0)
+            continue
+        name = os.path.basename(word)
+        if name not in _WRITE_WRAPPERS:
+            break
+        argv.pop(0)
+        values = _WRAPPER_VALUE_OPTIONS.get(name, set())
+        while argv and argv[0][0].startswith("-") and argv[0][0] != "-":
+            option = argv.pop(0)[0]
+            if option == "--":
+                break
+            if option in values and argv:
                 argv.pop(0)
+        if name == "timeout" and argv:
+            argv.pop(0)  # the duration
     if not argv:
-        return targets, cwd
+        return targets
     cmd = os.path.basename(argv[0][0])
     args = argv[1:]
+    cwd = state["cwd"]
 
-    if cmd in ("cd", "pushd"):
-        dest = [a for a in args if not a[0].startswith("-")]
-        new = _expand(dest[0][0], dest[0][1], cwd) if dest else os.path.expanduser("~")
-        return targets, new or cwd
-    if cmd == "tee":
+    if cmd in ("cd", "pushd", "popd"):
+        _change_directory(cmd, args, state)
+    elif cmd == "tee":
         targets.extend(_positionals(args, set()))
     elif cmd in _COPY_COMMANDS:
         targets.extend(_copy_destinations(cmd, args))
     elif cmd in ("sed", "perl"):
         targets.extend(_in_place_files(cmd, args))
     elif cmd in _PATH_COMMANDS:
-        paths = _positionals(args, _VALUE_OPTIONS.get(cmd, set()))
-        if cmd == "chmod" and not any(a[0].startswith("--reference") for a in args):
-            paths = paths[1:]  # the mode
-        targets.extend(paths)
+        targets.extend(_positionals(args, _VALUE_OPTIONS.get(cmd, set())))
+    elif cmd == "chmod":
+        targets.extend(_chmod_paths(args))
     elif cmd == "dd":
         targets.extend((a[0][3:], a[1]) for a in args if a[0].startswith("of="))
+    elif cmd in ("curl", "wget", "sort", "unzip", "tar", "patch"):
+        targets.extend(_download_targets(cmd, args))
+    elif cmd == "git":
+        targets.extend(_git_targets(args, cwd))
+    elif cmd == "find":
+        targets.extend(_find_targets(args, state, depth))
     elif cmd in _SHELLS and depth < 3:
         for position, (text, _quoted) in enumerate(args):
             if text.startswith("-") and not text.startswith("--") and "c" in text[1:]:
                 if position + 1 < len(args):
+                    child = {"cwd": cwd, "old": state.get("old", ""), "dirs": []}
                     targets.extend((path, False) for path in
-                                   _shell_write_paths(args[position + 1][0], cwd, depth + 1))
+                                   _shell_write_paths(args[position + 1][0], child, depth + 1))
                 break
-    return targets, cwd
+    return targets
 
 
-def _shell_write_paths(command: str, cwd: str, depth: int = 0) -> list[str]:
+def _shell_write_paths(command: str, state: dict, depth: int = 0) -> list[str]:
     paths: list[str] = []
+
+    def record(found):
+        for text, quoted in found:
+            path = _expand(text, quoted, state["cwd"])
+            if path and path not in paths:
+                paths.append(path)
+
+    # One frame per open subshell: ( , $( or a backtick. A cd inside one does not
+    # outlive it, so the directory state is saved on the way in and restored on the
+    # way out.
+    frames: list[tuple[str, dict]] = []
     for segment in split_segments(_strip_heredoc_bodies(command)):
         words = _shell_words(segment)
         if words is None:
             continue
         simple: list = []
         for word in words + [("op", ";", False)]:
+            if word[0] == "sub":
+                if depth < 3:
+                    child = {"cwd": state["cwd"], "old": state.get("old", ""), "dirs": []}
+                    for path in _shell_write_paths(word[1], child, depth + 1):
+                        if path not in paths:
+                            paths.append(path)
+                continue
             if word[0] == "op" and word[1] in _COMMAND_BREAKS:
                 if simple:
-                    found, cwd = _simple_command_writes(simple, cwd, depth)
-                    for text, quoted in found:
-                        path = _expand(text, quoted, cwd)
-                        if path and path not in paths:
-                            paths.append(path)
+                    record(_simple_command_writes(simple, state, depth))
                 simple = []
+                saved = {"cwd": state["cwd"], "old": state.get("old", ""),
+                         "dirs": list(state["dirs"])}
+                if word[1] == "(":
+                    frames.append(("(", saved))
+                elif word[1] == "`":
+                    if frames and frames[-1][0] == "`":
+                        state.clear()
+                        state.update(frames.pop()[1])
+                    else:
+                        frames.append(("`", saved))
+                elif word[1] == ")" and frames and frames[-1][0] == "(":
+                    state.clear()
+                    state.update(frames.pop()[1])
             else:
                 simple.append(word)
     return paths
@@ -916,11 +1297,12 @@ def shell_write_targets(command: str, cwd: str = "") -> list[str]:
     """Absolute paths a Bash command writes, as far as its text shows them.
 
     Relative paths resolve against `cwd` (the hook input's cwd, else this process's),
-    and a `cd DIR` earlier in the same command moves that base, last cd winning.
-    Paths that come out already absolute (/dev/null, /tmp/x) are returned too; whether
-    they matter is owner_of()'s question.
+    and a cd, pushd or popd earlier in the command moves that base, except inside a
+    subshell, whose cd ends with it. Paths that come out already absolute (/dev/null,
+    /tmp/x) are returned too; whether they matter is owner_of()'s question.
     """
-    return _shell_write_paths(command, cwd or os.getcwd())
+    state = {"cwd": cwd or os.getcwd(), "old": "", "dirs": []}
+    return _shell_write_paths(command, state)
 
 
 def _decide_shell_write(tool_input: dict, active: str, reg: dict, root: Path,
@@ -1019,7 +1401,12 @@ def decide(tool_name: str, tool_input: dict, active: str, reg: dict,
     if tool_name == "Bash":
         # The shell-write deny comes first, so it wins over a cloud rewrite: rewriting
         # `az ... > <other home>/out.json` into the wrapper would still write there.
-        denied = _decide_shell_write(tool_input, active, reg, root, memory_root, cwd, iac_root)
+        try:
+            denied = _decide_shell_write(tool_input, active, reg, root, memory_root, cwd,
+                                         iac_root)
+        except Exception:  # noqa: BLE001
+            # A parser fault skips this check only, never the cloud check after it.
+            denied = None
         return denied or _decide_bash(tool_input, active, reg, cloud_wrapper(cfg))
     if tool_name in AGENT_TOOLS:
         return _decide_agent(tool_input, active, reg)

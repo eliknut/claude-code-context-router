@@ -5,10 +5,19 @@
 - The guard's write check now covers `Bash` too (the shell-write check). A command that writes
   into another context's home, owned folders or memory folder is denied: output redirects
   (`>`, `>>`, `2>`, `&>`, heredocs), `tee`, `cp`, `mv`, `install`, `rsync`, `ln`, `sed -i`,
-  `perl -i`, `rm`, `touch`, `mkdir`, `truncate`, `chmod`, `dd of=` and `bash -c '...'` strings.
-  Relative paths resolve against the hook input's `cwd` and any `cd` in the command. The deny wins
-  over a cloud rewrite, and `#noctx` does not bypass it. Not caught: `python -c`, `eval`, `xargs`,
-  scripts and paths in variables.
+  `perl -i`, `rm`, `touch`, `mkdir`, `truncate`, `chmod`, `dd of=`, `curl -o`, `wget`, `tar -x`,
+  `unzip`, `sort -o`, `patch`, git write subcommands (`git -C DIR commit` and the like, `git mv`,
+  `git clone DEST`), `find -delete` and `find -exec`, and `bash -c '...'` and `$(...)` strings,
+  including inside double quotes. Wrapper options (`sudo -u root`, `nice -n 10`, `env -u`,
+  `timeout 5`) do not hide the command. Relative paths resolve against the hook input's `cwd` and
+  any `cd`, `pushd` or `popd` in the command; a `cd` inside a subshell does not leak out of it.
+  The deny wins over a cloud rewrite, and `#noctx` does not bypass it. A fault in this parser
+  skips only the shell-write check, never the cloud check. Not caught: `python -c`, `eval`,
+  `xargs`, scripts, shell functions and paths in variables.
+- Command splitting now knows comments and backslash escapes, so an apostrophe in a comment
+  (`# don't`) or an escaped quote no longer hides the lines after it, and `>|` is read as a
+  redirect rather than a pipe. A command that spans several lines is never rewritten by the
+  cloud check as a whole; it is denied with the scoped form instead.
 - `guard.decide()` takes a `cwd` keyword; the hook passes the input's `cwd` field.
 
 ## 2.0.1

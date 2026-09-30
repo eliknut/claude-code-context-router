@@ -145,10 +145,15 @@ and `Task` call. It does three checks:
   writes and denies it when one is in another context: output redirects (`>`, `>>`, `2>`, `&>`,
   including `cat > file <<EOF`), `tee`, the destination of `cp`, `mv`, `install`, `rsync` and `ln`
   (and the sources `mv` removes), `sed -i` and `perl -i`, `rm`, `touch`, `mkdir`, `truncate`,
-  `chmod`, `dd of=`, and the same inside `bash -c '...'`. Relative paths resolve against the
-  session's working directory and any `cd` earlier in the command; `~` and `$HOME` are expanded.
-  Reads (`cat`, `grep`, `diff`, `<`, `git -C`) are never flagged. There is no `#noctx` for writes,
-  and this deny wins over a cloud rewrite.
+  `chmod`, `dd of=`, `curl -o`/`-O`, `wget`, `tar -x -C` and `tar -c -f`, `unzip`, `sort -o`,
+  `patch`, git subcommands that write (`commit`, `checkout`, `reset`, `pull`, `mv`, `clone` and
+  others; the repo or `-C DIR` counts as the target), `find -delete` and `find -exec`, and the
+  same inside `bash -c '...'` and `$(...)`, quoted or not. Relative paths resolve against the
+  session's working directory and any `cd`, `pushd` or `popd` earlier in the command (a `cd`
+  inside `( ... )` ends with the subshell); `~`, `$HOME` and `$PWD` are expanded. Reads (`cat`,
+  `grep`, `diff`, `<`, and read-only git such as `git -C DIR status`, `log` or `diff`) are not
+  flagged. There is no `#noctx` for writes, this deny wins over a cloud rewrite, and a fault in
+  this parser skips only this check, never the cloud check.
 - **Cloud check.** A bare `az`, `aws`, `terraform` or `terragrunt` call that is one plain command
   is rewritten to `cloudctx exec <scope> -- <command>`. Anything it cannot rewrite safely is denied
   with the scoped form to use instead: pipes, `&&`, substitutions, redirects, a leading
@@ -161,7 +166,8 @@ and `Task` call. It does three checks:
 What it does **not** catch, so the rules in `CLAUDE.md` still matter:
 
 - Bash writes the shell text does not show: `python -c`, `node -e`, `eval`, `xargs`, a script
-  file, `find -delete`, or a path held in a variable other than `$HOME` (such paths are skipped).
+  file, a shell function or alias, or a path held in a variable other than `$HOME` or `$PWD`
+  (such paths are skipped).
 - A cloud CLI inside a quoted string (`bash -c '...'`, `su -c '...'`), inside a script file, or
   behind an alias or shell function.
 - Anything run outside Claude Code's tools.

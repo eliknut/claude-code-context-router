@@ -873,5 +873,137 @@ class ShellWriteTests(TreeFixture, unittest.TestCase):
             self.assert_denied(f"echo x > {self.root}/Clients/Globex/x.md")
 
 
+class ShellWriteReviewTests(TreeFixture, unittest.TestCase):
+    """Regressions from the review of the shell-write check, run from inside the active
+    home with the other context as its sibling, ../globex."""
+
+    def decide(self, command, active="acme"):
+        return guard.decide("Bash", {"command": command}, active, REG, self.root,
+                            self.memory, cwd=str(self.root / "clients/acme"))
+
+    def assert_denied(self, *commands):
+        for command in commands:
+            with self.subTest(command=command):
+                d = self.decide(command)
+                self.assertEqual(d.action, "deny", command)
+                self.assertIn("'globex'", d.reason)
+
+    def assert_allowed(self, *commands):
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(self.decide(command).action, "allow", command)
+
+    def cloud(self, command):
+        return guard.decide("Bash", {"command": command}, "globex", CLOUD_REG,
+                            self.root, self.memory, cwd=str(self.root))
+
+    # 1. An apostrophe in a comment or an escaped quote must not hide the lines after it.
+    def test_an_apostrophe_in_a_comment_does_not_hide_later_lines(self):
+        self.assert_denied("# don't worry\ntouch ../globex/f")
+
+    def test_an_escaped_quote_does_not_hide_later_lines(self):
+        self.assert_denied("echo it\\'s done\ntouch ../globex/f", 'echo \\"\ntouch ../globex/f')
+
+    def test_a_comment_mid_line_hides_only_its_own_line(self):
+        self.assert_denied("ls # it's fine\necho x > ../globex/f")
+        self.assert_allowed("ls # > ../globex/f", "echo a#b > notes.md")
+
+    def test_the_cloud_check_still_sees_a_call_after_a_comment_with_an_apostrophe(self):
+        self.assertEqual(self.cloud("# don't\naz account show").action, "deny")
+
+    def test_a_comment_line_before_a_cloud_call_is_not_rewritten_into_one_line(self):
+        """Wrapping "# note\\naz ..." whole would leave the az line unscoped."""
+        self.assertEqual(self.cloud("# note\naz account show").action, "deny")
+        self.assertEqual(self.cloud("az account show #noctx").action, "allow")
+
+    # 2. >| is a redirect, not a pipe.
+    def test_the_clobber_redirect_is_denied(self):
+        self.assert_denied("echo x >| ../globex/f")
+
+    # 3. More writers.
+    def test_downloads_extracts_and_sort_are_denied(self):
+        self.assert_denied("curl -o ../globex/f https://x", "curl -sSLo ../globex/f https://x",
+                           "curl --output=../globex/f https://x",
+                           "cd ../globex && curl -O https://x/f",
+                           "wget -O ../globex/f https://x", "wget -P ../globex https://x",
+                           "cd ../globex && wget https://x/f",
+                           "tar -xf a.tar -C ../globex", "tar xzf a.tgz --directory=../globex",
+                           "cd ../globex && tar -xf /tmp/a.tar",
+                           "tar -czf ../globex/a.tgz .",
+                           "unzip a.zip -d ../globex", "sort -o ../globex/f a",
+                           "cd ../globex && patch -p1 < /tmp/d", "patch -d ../globex -p1 < /tmp/d",
+                           "patch ../globex/f /tmp/d")
+
+    def test_reading_downloads_and_archives_is_allowed(self):
+        self.assert_allowed("curl https://x", "curl -XPOST https://x -o /tmp/r",
+                            "wget -qO- https://x", "tar -tf ../globex/a.tar",
+                            "tar -xf ../globex/a.tar -C /tmp", "unzip -l ../globex/a.zip",
+                            "sort ../globex/f > /tmp/s")
+
+    def test_git_writes_are_denied(self):
+        self.assert_denied("git clone https://x/y ../globex/y", "cd ../globex && git clone https://x/y",
+                           "git mv a ../globex/a", "git -C ../globex commit -m x",
+                           "git -C ../globex checkout main", "cd ../globex && git pull",
+                           "git -c core.x=1 -C ../globex reset --hard")
+
+    def test_git_reads_are_allowed(self):
+        self.assert_allowed("git -C ../globex status", "git -C ../globex log --oneline",
+                            "git -C ../globex diff", "git -C ../globex show HEAD",
+                            "git -C ../globex fetch", "git -C ../globex branch",
+                            "git -C ../globex remote -v", "git -C ../globex rev-parse HEAD",
+                            "git -C ../globex worktree list", "git commit -m 'x > ../globex/f'")
+
+    def test_find_exec_and_delete_are_denied(self):
+        self.assert_denied("find . -name x -exec cp {} ../globex/ \\;",
+                           "find ../globex -name '*.tmp' -exec rm {} +",
+                           "find ../globex -name '*.tmp' -delete")
+
+    def test_find_that_only_reads_is_allowed(self):
+        self.assert_allowed("find ../globex -name '*.tf'", "find ../globex -exec grep -l x {} +",
+                            "find ../globex -name x -exec cp {} /tmp/ \\;")
+
+    # 4. Wrapper options.
+    def test_wrapper_options_do_not_hide_the_command(self):
+        self.assert_denied("sudo -u root cp a ../globex/", "nice -n 10 cp a ../globex/",
+                           "env -u FOO cp a ../globex/", "env FOO=1 BAR=2 cp a ../globex/",
+                           "timeout 5 cp a ../globex/", "timeout -s KILL 5 cp a ../globex/",
+                           "ionice -c 3 cp a ../globex/", "stdbuf -oL cp a ../globex/")
+
+    # 5. Substitutions inside double quotes.
+    def test_a_substitution_inside_double_quotes_is_read(self):
+        self.assert_denied('x="$(cp a ../globex/)"', 'echo "`touch ../globex/f`"',
+                           'echo "result: $(cd ../globex && touch f)"')
+
+    # 6. $PWD, chmod modes, mv -t sources.
+    def test_pwd_is_expanded(self):
+        self.assert_denied('touch "$PWD/../globex/f"', "touch ${PWD}/../globex/f")
+
+    def test_a_chmod_mode_that_looks_like_an_option_is_a_mode(self):
+        self.assert_denied("chmod -x ../globex/f", "chmod -R 755 ../globex",
+                           "chmod u+w,go-w ../globex/f")
+        self.assert_allowed("chmod +x run.sh", "chmod -R u+w ./sub")
+
+    def test_mv_with_a_target_directory_counts_its_sources(self):
+        self.assert_denied("mv -t . ../globex/f")
+
+    # 7. A parser fault skips only the shell-write check.
+    def test_a_parser_fault_still_runs_the_cloud_check(self):
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("parser fault")
+        with mock.patch.object(guard, "shell_write_targets", boom):
+            self.assertEqual(self.cloud("az account show").action, "update")
+
+    # 8. A cd that does not outlive its subshell, and popd.
+    def test_a_cd_inside_a_subshell_does_not_leak(self):
+        self.assert_allowed("(cd ../globex && ls); echo x > notes.md",
+                            "echo $(cd ../globex && pwd) > notes.md")
+        self.assert_denied("(cd ../globex && touch f)")
+
+    def test_pushd_and_popd_are_tracked(self):
+        self.assert_allowed("pushd ../globex; ls; popd; echo x > notes.md",
+                            "cd ../globex; ls; cd -; echo x > notes.md")
+        self.assert_denied("pushd ../globex && touch f", "pushd /tmp; popd; pushd ../globex; touch f")
+
+
 if __name__ == "__main__":
     unittest.main()
