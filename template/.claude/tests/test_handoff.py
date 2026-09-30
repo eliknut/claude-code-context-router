@@ -26,7 +26,7 @@ updated: 2026-09-09 17:40  |  session: "pick up northwind", id abc-123
 - none
 
 ## Recent
-- 2026-09-09  dashboard bicep built
+- 2026-09-09  status page built
 - 2026-09-02  kube audit written
 """
 
@@ -60,6 +60,19 @@ class HandoffTests(unittest.TestCase):
     def test_find_recent_includes_old_when_window_is_wide(self):
         found = handoff.find_recent_handoffs(self.root, days=365)
         self.assertEqual({h["context"] for h in found}, {"northwind", "fabrikam"})
+
+    def test_find_recent_with_homes_ignores_copies_outside_them(self):
+        """A backup mirror of a handoff, inside the root, is not a second context.
+
+        Snapshot tooling copies every HANDOFF.md into a folder under the root, so the
+        same context is found twice: once at its home and once in the mirror. Only the
+        copy sitting exactly at a registered home is the context's handoff.
+        """
+        backup = self.root / "repos" / "workspace" / "private" / "handoffs" / "customers" / "northwind" / "HANDOFF.md"
+        backup.parent.mkdir(parents=True)
+        backup.write_text(SAMPLE)
+        found = handoff.find_recent_handoffs(self.root, days=14, homes=["customers/northwind"])
+        self.assertEqual([h["path"] for h in found], [self.nw])
 
     def test_append_recent_inserts_at_top_and_caps(self):
         for i in range(12):

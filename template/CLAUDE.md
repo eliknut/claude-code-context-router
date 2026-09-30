@@ -8,13 +8,14 @@ The registry is NOT imported here. The SessionStart hook prints a digest of it, 
 name with its aliases, which is everything resolution needs. Once a context is resolved, read
 its one block from `CONTEXTS.md` for the cloud scope, home, IaC names and rules (section 2
 step 1 covers this). Search `CONTEXTS.md` directly for a folder path, or for any term the
-digest does not list. If the digest is missing from the session, read `CONTEXTS.md` in full
+digest does not list. The IaC layout table at the top of `CONTEXTS.md`, if you keep one,
+is not in the digest either: read it before any shared infrastructure work (section 6). If the digest is missing from the session, read `CONTEXTS.md` in full
 before resolving anything.
 
 ## 0. First run
 
-If the registry still only describes the three shipped example contexts (`northwind`,
-`platform`, `sideproject`), or nothing at all, the router is installed but not yet set up for your
+If the registry still only describes the four shipped example contexts (`northwind`,
+`globex`, `platform`, `sideproject`), or nothing at all, the router is installed but not yet set up for your
 work. Use the `context-bootstrap` skill and do nothing else first.
 
 ## 1. Resolve the context first
@@ -65,12 +66,17 @@ work. Use the `context-bootstrap` skill and do nothing else first.
    `<memory_dir>` with
    `python3 -c "import sys; sys.path.insert(0, '<root>/.claude/lib'); import rootpath; print(rootpath.memory_dir())"`
    Open individual memory files only when needed.
-5. Write the marker so the status line and the session-end hook know the context. The session id is
+5. If the context has `iac_names`, resolve its IaC folders with
+   `find <iac root> -maxdepth 4 -type d -path '*/environments/*' -iname '<iac_name>*'` for each
+   name, where `<iac root>` is the folder the IaC layout table in `CONTEXTS.md` describes.
+6. Write the marker so the status line and the session-end hook know the context. The session id is
    the `session_id:` line the SessionStart hook printed:
    `bash "<root>/.claude/scripts/set_context.sh" <ctx> <session_id>`
+   The guard reads this marker too: without it, writes are not checked and every cloud CLI call
+   is denied.
    On resume, compact or fork, if the SessionStart hook reports the context as unknown to the
    hooks, rewrite the marker now and do not re-ask which context this is.
-6. Start the first reply with the tag `[<ctx>]` followed by at most three lines from the handoff:
+7. Start the first reply with the tag `[<ctx>]` followed by at most three lines from the handoff:
    what is in flight, the next step, what is blocked. If there is no handoff, say so in one line.
 
 Every reply in the session starts with `[<ctx>]`.
@@ -79,11 +85,22 @@ Every reply in the session starts with `[<ctx>]`.
 ## 3. Scoped commands
 
 - No active context, no command that touches a live environment.
-- Every cloud or account call is scoped per command through your own wrapper, named in the
-  context's `cloud` line. Never bare, never a separate "switch context" call followed by a command.
-- Contexts with several accounts: confirm which one before the first call.
+- Every az, aws, terraform or terragrunt call runs as `cloudctx exec <scope> -- <command>`, where
+  `<scope>` is the name in the context's `cloudctx` line and `cloudctx` is your per-context
+  credential wrapper (any tool that runs one command with one context's credentials exported).
+  Never bare, never a separate "switch context" call followed by a command.
+- Contexts with several scopes: confirm which one before the first call.
 - Read-only by default. Anything that mutates needs the user's explicit approval in this session,
   in writing.
+- A `PreToolUse` guard (`.claude/hooks/context_guard.py`) rewrites a bare cloud CLI call into
+  `cloudctx exec <scope> -- <command>` when the command is a single plain invocation. It denies
+  the call instead when it is not (pipes, substitutions, redirects, a leading `VAR=value`, `sudo`,
+  a wrapper such as `time` or `env`), when the context has several scopes, or when no context is
+  active; the fix is always to write the scoped form yourself. For a context whose `cloudctx` is
+  `none` it asks, since a local `terraform fmt` needs no credentials. To run one unscoped on
+  purpose, put the token `#noctx` in the command, on its own and not inside quotes. The guard is
+  a safety net for the shapes an agent emits, not a sandbox: it does not see every way a shell
+  can reach a command, so these rules still bind whether or not it catches a given call.
 <!-- /optional: cloud -->
 
 ## 4. Where writes go
@@ -98,7 +115,12 @@ Every reply in the session starts with `[<ctx>]`.
   `.notes/`, and cover both patterns in your own global gitignore so they never show up in a diff.
   Before creating any file inside a repo, check `git -C <repo> remote -v`: a remote that is not
   yours means the file is a team change and needs approval.
-- Never write into another context's home, handoff or memory folder.
+- Never write into another context's home, handoff or memory folder. The guard denies this for
+  `Write`, `Edit` and `NotebookEdit`, including through a symlink and inside the memory tree. It
+  does not see a write made through Bash (`cat >`, `mv`, a python heredoc), so this rule binds you
+  whether or not the guard is watching.
+- Delegated subagents start blank. The guard prepends the active context's block (scope, home,
+  standing rules) to every `Agent` or `Task` prompt, except a fork, which inherits the session.
 
 ## 5. Handoff
 
@@ -141,9 +163,12 @@ produce.
 
 Some paths are consumed by more than one context: a module registry, a shared pipeline, a base
 configuration. List them under `owns` in whichever context represents that shared code (the shipped
-example calls it `platform`). If a change would land in one of them while a different context is
-active: stop, name every context affected, and offer to switch to the shared-code context. In a
-shared-code session, name the affected consumers before editing.
+example calls it `platform`), and, if you keep infrastructure as code, describe them in the IaC
+layout table at the top of `CONTEXTS.md`. Read that table before any shared infrastructure work.
+If a change would land in one of them while a different context is active: stop, name every
+context affected (every `environments/*/<iac_name>` under that repo, or every consumer of a module
+registry), and offer to switch to the shared-code context. In a shared-code session, name the
+affected consumers before editing.
 <!-- /optional: shared code -->
 
 ## 7. Wrong directory

@@ -5,7 +5,7 @@ description: Use on the first run after installing the context router kit, whene
 
 # context-bootstrap
 
-The machinery is installed, but the registry still only describes the three shipped example
+The machinery is installed, but the registry still only describes the four shipped example
 contexts (or nothing, if those were already deleted), not the adopter's real work. This turns the
 folders that are actually on this machine into contexts, without erasing anything the adopter, or a
 previous run of this skill, or `new-context`, already curated below the marker.
@@ -71,8 +71,8 @@ of sibling projects is a parent, not a context, and each child is a candidate.
 ## 3. Propose, then confirm
 
 First, parse what is already below the marker in `CONTEXTS.md` and list every existing block by
-name, `kind` and `home`. Flag, by name, any block that matches one of the three shipped examples
-(`northwind`, `platform`, `sideproject`): those are illustration, not curated work, and this is
+name, `kind` and `home`. Flag, by name, any block that matches one of the four shipped examples
+(`northwind`, `globex`, `platform`, `sideproject`): those are illustration, not curated work, and this is
 where you say so rather than assuming either that they are real or that they are junk. Every other
 existing block is the adopter's own until they say otherwise; it is not yours to remove or rewrite
 on your own judgement.
@@ -87,7 +87,7 @@ Then ask, in a single message:
 - which proposals are wrong, and what they should be
 - which folders to leave out of the registry entirely
 - for each new context, any other name the person calls it, which becomes `aliases`
-- whether any new context needs per-context cloud or account scoping, which becomes `cloud`
+- whether any new context needs per-context cloud or account scoping, which becomes `cloudctx`
 - which of the flagged shipped-example blocks, if any, to remove
 - whether any existing block needs a change today, and what
 
@@ -110,7 +110,7 @@ smarter" once they get round to the folders they skipped the first time, must ne
 work gets lost.
 
 `CONTEXTS.md` already exists at the root in the common case: the installer seeds it with an intro
-paragraph, the key schema, the `<!-- registry -->` marker and the three shipped example contexts.
+paragraph, the key schema, the `<!-- registry -->` marker and the four shipped example contexts.
 Open it and keep everything from the top of the file through the marker line exactly as it is: the
 adopter may already have edited that intro (added a note, tweaked the schema description), and
 this step is not a chance to revert it back to whatever the installer originally seeded. Below the
@@ -120,7 +120,7 @@ marker:
   remove in step 3, exactly as it is: same fields, same values, same position. Never delete one
   without an explicit "yes, remove this" naming that block; a context can legitimately have no
   folder yet, so an inventory that never mentioned it is not grounds to remove it.
-- Remove a shipped example block (`northwind`, `platform`, `sideproject`) only when the person
+- Remove a shipped example block (`northwind`, `globex`, `platform`, `sideproject`) only when the person
   confirmed removing it in step 3, not on its name alone.
 - Update an existing block's fields only when the person explicitly asked for that change in step
   3. Do not rewrite a block just because the file is already open.
@@ -139,11 +139,11 @@ marker:
 The key schema, so this step never depends on reading another file to know it (this is what
 `registry.py` actually parses, so treat it as the authority if the seeded text and this note ever
 disagree): `kind` (a category, the adopter's own set), `status` (its stage of life, the adopter's
-own set), `aliases` (comma separated, case-insensitive, blank if none), `cloud` (per-context cloud
+own set), `aliases` (comma separated, case-insensitive, blank if none), `cloudctx` (per-context cloud
 or account scoping, or `none`), `home` (folder relative to the root, or `none`), `iac_names` (comma
 separated names under an infrastructure layout, blank unless one applies), `owns` (extra folders,
 one per line, only when there are any), `rules` (standing rules, one per line, only when there are
-any). Write each new block in this field order: `kind`, `status`, `aliases`, `cloud`, `home`,
+any). Write each new block in this field order: `kind`, `status`, `aliases`, `cloudctx`, `home`,
 `iac_names`, `owns` (omit the key entirely when there are none), `rules` (omit the key entirely
 when there are none). Write `iac_names:` with no value unless the adopter has an infrastructure
 layout that uses it.
@@ -185,7 +185,7 @@ if it does not already exist, filling its one placeholder, `{{name}}`.
 
 This step does not touch `.claude/skills/new-context/templates/CLAUDE.md.tmpl` at all. Unlike `new-context`, which seeds a
 home `CLAUDE.md` for the single context it registers, bootstrap does not write one for every folder
-it discovers here: a dozen near-identical files carrying a `cloud` value nobody has decided on yet
+it discovers here: a dozen near-identical files carrying a `cloudctx` value nobody has decided on yet
 is clutter dressed as configuration, not a context that is ready to use. See the hand-over step for
 how the adopter fills this in later, per context, as needed.
 
@@ -201,7 +201,7 @@ echo '{"session_id":"bootstrap-check","source":"startup"}' | python3 "<root>/.cl
 
 Expected: no unregistered folders and no missing homes, the tests pass, and the SessionStart
 output lists the handoffs just seeded. This cannot pass while step 4 has not run yet: a
-still-seeded registry covers nothing but the three examples, so `registry_check.py` reports every
+still-seeded registry covers nothing but the four examples, so `registry_check.py` reports every
 top level folder as unregistered and exits 1; if `CONTEXTS.md` is missing entirely it exits 2 with
 a one-line message naming the path it looked for, not a traceback. If it still reports unregistered
 folders after step 4, either register them or add them to the `ignore` block, and say which you

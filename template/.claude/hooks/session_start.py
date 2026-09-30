@@ -34,17 +34,37 @@ UNKNOWN_LINE = ("Active context: unknown to the hooks. If a context is already a
                 "rewrite its marker now (CLAUDE.md section 2) and do not re-ask which context this is.")
 
 
-def print_registry_digest() -> None:
+def load_contexts() -> dict | None:
+    """The registry, or None when it cannot be read.
+
+    Failure is deliberately soft: the hook must not take the session down with it.
+    Both callers below decide for themselves what None means for them.
+    """
+    try:
+        return registry.contexts(registry.load_registry(ROOT / "CONTEXTS.md"))
+    except (OSError, ValueError):
+        return None
+
+
+def context_homes(reg: dict | None) -> list[str] | None:
+    """Home paths of every context, or None when the registry is unreadable.
+
+    None means "do not filter", so an unreadable registry degrades to listing every
+    handoff in the tree rather than to listing none of them.
+    """
+    if reg is None:
+        return None
+    return [e["home"].strip("/") for e in reg.values()
+            if e.get("home") and e["home"] != "none"]
+
+
+def print_registry_digest(reg: dict | None) -> None:
     """One line per context: the name, then its aliases.
 
     Failure is deliberately soft and loud. If the registry cannot be read the hook
     must not take the session down with it, but it must also not leave Claude
     believing there are no contexts, so it says to read the file directly instead.
     """
-    try:
-        reg = registry.contexts(registry.load_registry(ROOT / "CONTEXTS.md"))
-    except (OSError, ValueError):
-        reg = None
     if not reg:
         print("Registry digest unavailable: read CONTEXTS.md directly before resolving a context.")
         return
@@ -82,8 +102,9 @@ def main() -> int:
         print(UNKNOWN_LINE)
     else:
         print(NONE_LINE)
-    print_registry_digest()
-    recent = find_recent_handoffs(ROOT, days=DAYS)
+    reg = load_contexts()
+    print_registry_digest(reg)
+    recent = find_recent_handoffs(ROOT, days=DAYS, homes=context_homes(reg))
     if not recent:
         print(f"No HANDOFF.md updated in the last {DAYS} days.")
         return 0

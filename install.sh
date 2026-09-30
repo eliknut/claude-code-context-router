@@ -200,7 +200,9 @@ KIT_OWNED=(
   .claude/hooks/session_start.py
   .claude/hooks/session_end.py
   .claude/hooks/user_prompt_submit.py
+  .claude/hooks/context_guard.py
   .claude/lib/rootpath.py
+  .claude/lib/guard.py
   .claude/lib/registry.py
   .claude/lib/handoff.py
   .claude/scripts/set_context.sh
@@ -213,6 +215,8 @@ KIT_OWNED=(
   .claude/tests/test_rootpath.py
   .claude/tests/test_registry.py
   .claude/tests/test_handoff.py
+  .claude/tests/test_guard.py
+  .claude/tests/test_context_guard.py
 )
 
 # destination|source under template/
@@ -279,6 +283,17 @@ if [ -f "$ROOT/CLAUDE.md" ] && grep -q '^@CONTEXTS\.md[[:space:]]*$' "$ROOT/CLAU
   echo "      of it instead, so that import is now redundant and costs tokens every session."
   echo "      CLAUDE.md is yours and is never overwritten, so remove that line by hand, and"
   echo "      add a first activation step: read the context's own block in CONTEXTS.md."
+fi
+
+# Same kind of nag, for 2.0.0. The PreToolUse guard ships as a kit file and its hook entry is
+# merged below, so it runs either way. But CLAUDE.md is yours and still describes the 1.x
+# rules, which say nothing about a cloud call being rewritten or denied, or about #noctx.
+if [ -f "$ROOT/CLAUDE.md" ] && ! grep -q 'context_guard' "$ROOT/CLAUDE.md"; then
+  echo
+  echo "note: 2.0.0 adds a PreToolUse guard (.claude/hooks/context_guard.py) that denies writes"
+  echo "      into another context, scopes bare az/aws/terraform/terragrunt calls through"
+  echo "      cloudctx, and briefs subagents. Your CLAUDE.md does not mention it. It is yours and"
+  echo "      is never overwritten, so compare sections 3 and 4 with template/CLAUDE.md by hand."
 fi
 
 echo

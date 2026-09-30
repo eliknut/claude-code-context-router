@@ -57,7 +57,7 @@ with an unfinished TODO field, ask for the missing value and fix the line.
      `set_context.sh` validates the name and rejects one that has a space. If the natural name has
      a space in it ("acme corp"), pick a single-token name ("acme-corp" or "acmecorp") and offer
      the spaced form as an alias instead.
-   - `cloud`: the per-context cloud or account scoping, or `none`.
+   - `cloudctx`: the per-context cloud or account scoping, or `none`.
    - `home`: the folder, relative to the root. Default to the folder the user named.
 2. Refuse if the name or any alias already resolves. Check the name, and then check each alias
    one by one:
@@ -96,7 +96,7 @@ with an unfinished TODO field, ask for the missing value and fix the line.
    kind: <kind>
    status: <status>
    aliases: <aliases>
-   cloud: <cloud>
+   cloudctx: <cloud>
    home: <home>
    iac_names: <iac_names>
    rules:

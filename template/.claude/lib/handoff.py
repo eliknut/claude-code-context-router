@@ -20,15 +20,29 @@ def _section(text: str, header: str) -> str:
     return m.group(1) if m else ""
 
 
-def find_recent_handoffs(root: Path, days: int, now: dt.datetime | None = None) -> list[dict]:
+def find_recent_handoffs(root: Path, days: int, now: dt.datetime | None = None,
+                         homes: list[str] | None = None) -> list[dict]:
+    """Every HANDOFF.md under `root` updated within `days`, newest first.
+
+    `homes` is the set of context home paths, relative to root. When given, a handoff
+    counts only if it sits exactly at one of them. Snapshot and backup tooling mirrors
+    handoffs into folders inside the root, and without this filter the same context is
+    reported once per copy. The match is exact rather than a prefix on purpose: a mirror
+    nested under a context's own home would otherwise still pass.
+    """
     now = now or dt.datetime.now()
     cutoff = now - dt.timedelta(days=days)
+    wanted = None if homes is None else {h.strip("/") for h in homes}
     found: list[dict] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
         if HANDOFF_NAME not in filenames:
             continue
         path = Path(dirpath) / HANDOFF_NAME
+        if wanted is not None:
+            rel = os.path.relpath(dirpath, root).replace(os.sep, "/")
+            if rel not in wanted:
+                continue
         mtime = dt.datetime.fromtimestamp(path.stat().st_mtime)
         if mtime < cutoff:
             continue
