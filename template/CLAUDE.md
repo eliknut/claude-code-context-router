@@ -88,7 +88,9 @@ Every reply in the session starts with `[<ctx>]`.
 - Every az, aws, terraform or terragrunt call runs as `cloudctx exec <scope> -- <command>`, where
   `<scope>` is the name in the context's `cloudctx` line and `cloudctx` is your per-context
   credential wrapper (any tool that runs one command with one context's credentials exported).
-  Never bare, never a separate "switch context" call followed by a command.
+  Never bare, never a separate "switch context" call followed by a command. If
+  `.claude/kit.json` sets `cloud_wrapper` to another name, that name replaces `cloudctx` in this
+  section. If it sets `false`, the guard does no cloud scoping and this section can be deleted.
 - Contexts with several scopes: confirm which one before the first call.
 - Read-only by default. Anything that mutates needs the user's explicit approval in this session,
   in writing.

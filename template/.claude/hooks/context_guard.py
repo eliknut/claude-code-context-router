@@ -1,9 +1,10 @@
 """PreToolUse hook: keep a tool call inside the active context.
 
-Three detectors, all decided in lib/guard.py: a write into another context's home,
-handoff or memory is denied; a bare az, aws, terraform or terragrunt call is rewritten
-to run under cloudctx; and a delegated subagent gets the active context's block
-prepended to its prompt.
+Three checks, all decided in lib/guard.py. The write check denies a write into another
+context's home, handoff or memory. The cloud check rewrites a bare az, aws, terraform or
+terragrunt call to run under the credential wrapper (cloudctx unless .claude/kit.json
+names another, or sets cloud_wrapper to false to turn the check off). The subagent check
+prepends the active context's block to a delegated subagent's prompt.
 
 Everything unexpected is soft. The hook exits 0 and emits nothing, writing one line to
 stderr, because a broken guard must never be able to stop work.
@@ -64,7 +65,7 @@ def main() -> int:
         tool_input = data.get("tool_input") or {}
         decision = guard.decide(data.get("tool_name", ""), tool_input,
                                 active_context(data.get("session_id", "")),
-                                reg, root, rootpath.memory_dir())
+                                reg, root, rootpath.memory_dir(), rootpath.config(root))
         emit(decision, tool_input)
     except Exception as exc:  # noqa: BLE001
         print(f"context_guard skipped: {exc}", file=sys.stderr)

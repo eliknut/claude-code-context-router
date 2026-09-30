@@ -1,5 +1,5 @@
 #!/bin/bash
-# install.sh: install the context router kit into a project root.
+# install.sh: install claude-code-context-router into a project root.
 #
 # Usage:
 #   ./install.sh --root <path>                     show the plan, write nothing
@@ -9,9 +9,10 @@
 #
 # Files under .claude/{hooks,lib,scripts,skills,tests} belong to the kit and are replaced
 # on every install, with a backup. CLAUDE.md, CONTEXTS.md, .claude/kit.json and
-# save-phrases.txt belong to you and are only ever seeded when absent, unless --force
-# says otherwise. --force also governs an existing statusLine entry in your home
-# settings.json and an existing $HOME/.claude/statusline.sh.
+# save-phrases.txt belong to you and are only ever seeded when absent. --force replaces
+# CLAUDE.md, CONTEXTS.md and save-phrases.txt (with a backup), never kit.json. --force
+# also governs an existing statusLine entry in your home settings.json and an existing
+# $HOME/.claude/statusline.sh.
 set -euo pipefail
 
 KIT="$(cd "$(dirname "$0")" && pwd)"
@@ -30,13 +31,17 @@ Usage:
   ./install.sh --root <path> --apply             write it
   ./install.sh --root <path> --apply --statusline also install the status line
   --force                                        overwrite a file you own: CLAUDE.md,
-                                                  CONTEXTS.md, .claude/kit.json,
+                                                  CONTEXTS.md,
                                                   .claude/hooks/save-phrases.txt,
                                                   $HOME/.claude/statusline.sh, and an
                                                   existing statusLine entry in
                                                   $HOME/.claude/settings.json
+                                                  (.claude/kit.json is never replaced)
+  -h, --help                                     show this help
+
+Exit codes: 0 ran clean, 1 refused, 2 usage error.
 USAGE
-  exit 2
+  exit "${1:-2}"
 }
 
 while [ $# -gt 0 ]; do
@@ -45,7 +50,7 @@ while [ $# -gt 0 ]; do
     --apply) APPLY=1; shift;;
     --statusline) STATUSLINE=1; shift;;
     --force) FORCE=1; shift;;
-    -h|--help) usage;;
+    -h|--help) usage 0;;
     *) echo "unknown argument: $1" >&2; usage;;
   esac
 done
@@ -231,7 +236,7 @@ line() { printf '  %-8s %s\n' "$1" "$2"; }
 place() { mkdir -p "$(dirname "$2")"; rm -f "$2"; cp "$1" "$2"; }
 keep() { mkdir -p "$(dirname "$BACKUP/$1")"; cp "$2" "$BACKUP/$1"; }
 
-echo "context router kit $VERSION"
+echo "claude-code-context-router $VERSION"
 echo "root: $ROOT"
 if [ "$APPLY" = 1 ]; then echo "mode: apply"; else echo "mode: dry run, nothing will be written"; fi
 
@@ -258,7 +263,11 @@ contexts_seeded=0
 for pair in "${ADOPTER_OWNED[@]}"; do
   rel="${pair%%|*}"; srcrel="${pair##*|}"
   src="$TEMPLATE/$srcrel"; dest="$ROOT/$rel"
-  if [ -f "$dest" ] && [ "$FORCE" = 0 ]; then
+  if [ -f "$dest" ] && [ "$rel" = ".claude/kit.json" ]; then
+    # Never replaced, not even with --force: it holds settings, and a missing key
+    # already means its default.
+    line SKIP "$rel (yours, never replaced)"
+  elif [ -f "$dest" ] && [ "$FORCE" = 0 ]; then
     line SKIP "$rel (yours)"
   elif [ -f "$dest" ]; then
     line REPLACE "$rel (--force)"; changes=$((changes+1))
@@ -271,29 +280,11 @@ for pair in "${ADOPTER_OWNED[@]}"; do
   fi
 done
 
-# An upgrade-only nag, not a change. From 1.1.0 the SessionStart hook prints a registry
-# digest and CLAUDE.md no longer imports the whole registry. CLAUDE.md is adopter-owned and
-# is never overwritten, so someone upgrading from 1.0.0 keeps their "@CONTEXTS.md" line,
-# gets the new hook, and sees none of the saving. Nothing breaks either way, which is exactly
-# why it needs saying out loud: a silent no-op is the kind of thing nobody ever notices.
-if [ -f "$ROOT/CLAUDE.md" ] && grep -q '^@CONTEXTS\.md[[:space:]]*$' "$ROOT/CLAUDE.md"; then
+# An older install: say where the upgrade notes are, since CLAUDE.md is never replaced.
+previous="$(cat "$ROOT/.claude/.kit-version" 2>/dev/null || true)"
+if [ -f "$ROOT/.claude/hooks/session_start.py" ] && [ "$previous" != "$VERSION" ]; then
   echo
-  echo "note: your CLAUDE.md still has the line \"@CONTEXTS.md\", which imports the whole"
-  echo "      registry into every session. Since 1.1.0 the SessionStart hook prints a digest"
-  echo "      of it instead, so that import is now redundant and costs tokens every session."
-  echo "      CLAUDE.md is yours and is never overwritten, so remove that line by hand, and"
-  echo "      add a first activation step: read the context's own block in CONTEXTS.md."
-fi
-
-# Same kind of nag, for 2.0.0. The PreToolUse guard ships as a kit file and its hook entry is
-# merged below, so it runs either way. But CLAUDE.md is yours and still describes the 1.x
-# rules, which say nothing about a cloud call being rewritten or denied, or about #noctx.
-if [ -f "$ROOT/CLAUDE.md" ] && ! grep -q 'context_guard' "$ROOT/CLAUDE.md"; then
-  echo
-  echo "note: 2.0.0 adds a PreToolUse guard (.claude/hooks/context_guard.py) that denies writes"
-  echo "      into another context, scopes bare az/aws/terraform/terragrunt calls through"
-  echo "      cloudctx, and briefs subagents. Your CLAUDE.md does not mention it. It is yours and"
-  echo "      is never overwritten, so compare sections 3 and 4 with template/CLAUDE.md by hand."
+  echo "note: upgrading from ${previous:-an unknown version} to $VERSION; see CHANGELOG.md for what to check in your CLAUDE.md"
 fi
 
 echo
@@ -357,9 +348,7 @@ PY
 )"
   echo "$sl_settings_out"
   # The bash-side statusline.sh NEW/REPLACE lines above already count toward
-  # $changes; this python step is the one that used to report a real write
-  # ("NEW statusLine in ...") while never touching the counter, so the summary
-  # could still say "no changes" underneath it.
+  # $changes; a real write from this python step must count too.
   case "$sl_settings_out" in
     *"  NEW      statusLine"*|*"  REPLACE  statusLine"*) changes=$((changes+1));;
   esac
@@ -371,9 +360,8 @@ fi
 
 echo
 if [ "$APPLY" = 1 ]; then
-  # Printed here, from the exact variables that made the backup, rather than
-  # left to the spec, the plan or a person's memory: a restore instruction
-  # that is generated cannot drift from the layout it describes.
+  # Printed from the exact variables that made the backup, so the restore
+  # instruction cannot drift from the layout it describes.
   if [ -d "$BACKUP" ]; then
     echo "backups: $BACKUP"
     echo "restore: cp -R \"$BACKUP/.\" \"$ROOT/\""
@@ -387,7 +375,7 @@ if [ "$APPLY" = 1 ]; then
   echo "next:"
   echo "  1. start Claude Code in $ROOT so the hooks load"
   if [ "$contexts_seeded" = 1 ]; then
-    echo "  2. ask it to run the context-bootstrap skill; it inventories your folders and writes your registry"
+    echo "  2. say \"set up my contexts\": the context-bootstrap skill inventories your folders and writes your registry"
   else
     echo "  2. CONTEXTS.md already exists (yours, left alone); ask it to run the new-context skill for anything not yet registered"
   fi

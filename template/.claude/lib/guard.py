@@ -102,13 +102,36 @@ def _fold(text: str, fold: bool) -> str:
     return text.casefold() if fold else text
 
 
-def owner_of(target: str, reg: dict, root: Path, memory_root: Path) -> str:
+def _iac_claim(relative_parts: list[str], iac_root: str, entry: dict, fold: bool) -> str:
+    """The IaC folder of this context that contains the path, or "".
+
+    A context's IaC folders are <iac root>/<repo>/environments/<stage>/<iac_name>*,
+    the same folders the router resolves with find at activation. Stages starting
+    with "_" (such as _base) are shared, so they are never claimed by one context.
+    Matched case-insensitively, like find -iname.
+    """
+    base = [_fold(p, fold) for p in iac_root.strip("/").split("/") if p]
+    if not base or relative_parts[:len(base)] != base:
+        return ""
+    rest = relative_parts[len(base):]
+    if len(rest) < 4 or rest[1] != "environments" or rest[2].startswith("_"):
+        return ""
+    folder = rest[3].casefold()
+    for name in entry.get("iac_names", []):
+        if name and folder.startswith(name.casefold()):
+            return "/".join(base + rest[:4])
+    return ""
+
+
+def owner_of(target: str, reg: dict, root: Path, memory_root: Path, iac_root: str = "") -> str:
     """The context that owns `target`, or "" when no context does.
 
     Resolved through symlinks first, so a link inside one context cannot be used to
     write into another. The longest matching claim wins: "clients" and
     "clients/acme" are both homes, and a file under the latter belongs to the
-    latter.
+    latter. When `iac_root` is set, a context's IaC folders count as claims too, so
+    a context's own environment folder inside a shared infrastructure repo belongs
+    to that context and not to whichever context owns the repo.
     """
     real = Path(os.path.realpath(target))
 
@@ -136,13 +159,18 @@ def owner_of(target: str, reg: dict, root: Path, memory_root: Path) -> str:
     real_parts = [_fold(p, fold) for p in real.parts]
     if real_parts[:len(base)] != base:
         return ""
-    relative = "/".join(real_parts[len(base):])
+    relative_parts = real_parts[len(base):]
+    relative = "/".join(relative_parts)
 
     best = ""
     best_length = -1
     for name, entry in reg.items():
-        for claimed in _owned_paths(entry):
-            claimed = _fold(claimed, fold)
+        claims = [_fold(c, fold) for c in _owned_paths(entry)]
+        if iac_root:
+            iac = _iac_claim(relative_parts, iac_root, entry, fold)
+            if iac:
+                claims.append(iac)
+        for claimed in claims:
             if relative == claimed or relative.startswith(claimed + "/"):
                 if len(claimed) > best_length:
                     best, best_length = name, len(claimed)
@@ -150,6 +178,23 @@ def owner_of(target: str, reg: dict, root: Path, memory_root: Path) -> str:
 
 
 CLOUD_COMMANDS = {"az", "aws", "terraform", "terragrunt"}
+DEFAULT_WRAPPER = "cloudctx"
+
+
+def cloud_wrapper(cfg: dict | None) -> str:
+    """The credential wrapper named by kit.json's cloud_wrapper, or "" when disabled.
+
+    Missing or null means the default, cloudctx. false turns cloud scoping off
+    entirely. Any other non-empty string is the wrapper's command name, which must
+    accept `<wrapper> exec <scope> -- <command>`. Anything else falls back to the
+    default, because a malformed config must not silently switch scoping off.
+    """
+    value = (cfg or {}).get("cloud_wrapper", DEFAULT_WRAPPER)
+    if value is False:
+        return ""
+    if isinstance(value, str) and value.strip() and not any(c.isspace() for c in value.strip()):
+        return value.strip()
+    return DEFAULT_WRAPPER
 NO_GUARD_TOKEN = "#noctx"
 # Anything here means the command is more than one plain invocation, so rewriting it
 # by wrapping the whole string would change what it does. Deliberately conservative:
@@ -162,22 +207,15 @@ _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # backslash stay in _NOT_SIMPLE's checks on the whole string: they are live inside
 # double quotes, and rejecting them inside single quotes too is merely conservative.
 _UNQUOTED_ONLY = ("<<", ">", "<", "&", "(", ")")
-# Words that can precede the real command without being it. Not exhaustive, and it
-# does not need to be: a word we fail to skip costs a missed hit, which is the same
-# position we are in today with no guard at all.
+# Words that can precede the real command without being it. Not exhaustive: a word
+# that is not skipped costs a missed hit, the same outcome as having no guard.
 _WRAPPERS = frozenset({"if", "while", "until", "then", "do", "else", "elif", "time",
                        "sudo", "env", "xargs", "nohup", "command", "exec", "!"})
-# Wrappers that hand the command a fresh environment. cloudctx scopes by exporting
-# variables, so a rewrite through one of these produces a command that runs unscoped
-# while reporting itself as scoped. Asking is the only honest answer.
-#
-# Only sudo, because only sudo is reachable: this set is consulted after cloud_hits()
-# has already found a hit, and a hit needs segment_command() to see through the wrapper
-# word, which it only does for the words in _WRAPPERS. su and doas are not in there and
-# never will be: adding them would catch "su az ..." but not "su -c 'az ...'", the form
-# people actually type, whose payload sits inside a quoted string this parser does not
-# open. Naming them here made the set look closed when it was half-open, so su -c is
-# deliberately out of scope and stated as such rather than pretended away.
+# Wrappers that hand the command a fresh environment. The credential wrapper scopes by
+# exporting variables, so a rewrite through one of these produces a command that runs
+# unscoped while reporting itself as scoped. Only sudo is listed, because only words in
+# _WRAPPERS are seen through at all. `su -c '...'` and `doas` are out of scope: their
+# payload sits inside a quoted string this parser does not open.
 _ENV_RESETTING = frozenset({"sudo"})
 
 
@@ -228,9 +266,8 @@ def segment_command(segment: str) -> str:
     we scan every token for a cloud CLI name, because a missed cloud call is a silent
     unscoped command, while a missed ordinary command costs nothing.
 
-    An earlier version fell back to the first token, on the grounds that the shell
-    would refuse a segment shlex cannot parse. That holds for an unterminated quote
-    and not for a trailing backslash, which bash reads as a line continuation and runs.
+    Falling back to the first token is not enough: bash refuses an unterminated
+    quote, but reads a trailing backslash as a line continuation and runs it.
     Scanning for a cloud name specifically, rather than calling every unparseable
     segment a hit, keeps the failure closed where it matters: `echo "unterminated`
     must not prompt.
@@ -357,7 +394,7 @@ def _unquoted_text(command: str) -> str:
 
 
 def cloud_hits(command: str) -> list[str]:
-    """Segments that invoke a cloud CLI without going through cloudctx.
+    """Segments that invoke a cloud CLI directly, not through the credential wrapper.
 
     Segments are split again on command substitution and grouping, because a shell
     starts a fresh command after $( , a backtick or a parenthesis, and the invocation
@@ -365,9 +402,8 @@ def cloud_hits(command: str) -> list[str]:
     """
     hits = []
     for segment in split_segments(command):
-        # No explicit cloudctx skip: "cloudctx" is not in CLOUD_COMMANDS, so a segment whose
-        # command is cloudctx already fails the membership test below. A separate skip would
-        # be a line no test could ever kill.
+        # No explicit wrapper skip: the wrapper is not in CLOUD_COMMANDS, so a segment
+        # whose command is the wrapper already fails the membership test below.
         if not _parses(segment):
             # The segment's own quoting is broken, so we cannot tell which token is the
             # command. segment_command falls back to scanning every token for a cloud name,
@@ -398,7 +434,7 @@ def cloud_hits(command: str) -> list[str]:
 
 
 def is_simple(command: str) -> bool:
-    """True when wrapping the whole command in cloudctx exec is safe."""
+    """True when wrapping the whole command in the credential wrapper is safe."""
     if len(split_segments(command)) != 1:
         return False
     unquoted = _unquoted_text(command)
@@ -417,7 +453,7 @@ def _starts_with_assignment(command: str) -> bool:
 
     cloudctx exec runs its command as an argv with no shell between, so wrapping
     "FOO=1 az ..." produces an argv whose first element is "FOO=1" and execution fails
-    with FileNotFoundError. Asking is right: the rewrite could not have worked.
+    with FileNotFoundError. Denying is right: the rewrite could not have worked.
     """
     tokens = command.split()
     return bool(tokens) and bool(_ASSIGNMENT.match(tokens[0]))
@@ -437,26 +473,27 @@ def _first_token(command: str) -> str:
     return os.path.basename(tokens[0].strip("\"'")) if tokens else ""
 
 
-def _decide_bash(tool_input: dict, active: str, reg: dict) -> Decision:
+def _decide_bash(tool_input: dict, active: str, reg: dict,
+                 wrapper: str = DEFAULT_WRAPPER) -> Decision:
     """Decide a Bash call: rewrite it, refuse it, or stay out of the way.
 
-    Only two answers carry weight here. A cloud call we can scope safely is rewritten; a
-    cloud call we cannot scope is denied. There is deliberately no "ask" for anything that
-    would touch a live tenant, because an ask is not reliably a pause: in a permission mode
-    that auto-approves, it is indistinguishable from allow, and the command runs against
-    whatever tenant is ambient. Observed directly: a hook returning ask
-    for `az --version` produced no prompt at all.
+    A cloud call that can be scoped safely is rewritten; one that cannot is denied.
+    There is no "ask" for anything that would touch a live tenant, because in a
+    permission mode that auto-approves, an ask is indistinguishable from allow and the
+    command runs against whatever tenant is ambient.
 
-    The remedy for every deny below is the same and is named in its reason: write the
-    scoped form, `cloudctx exec <name> -- <command>`. That is what CLAUDE.md section 3
-    requires anyway, so the deny costs a reformulation, never the work itself. `#noctx`
-    remains the deliberate exit.
+    The remedy for every deny below is named in its reason: write the scoped form,
+    `<wrapper> exec <name> -- <command>`, which CLAUDE.md section 3 requires anyway.
+    `#noctx` remains the deliberate exit.
 
-    The single surviving ask is a context with no cloud scope at all. There is no tenant to
-    get wrong there, many contexts are in that state, and a local `terraform fmt` or
-    `az --version` is legitimate work that a deny would dead-end.
+    The one ask is a context with no cloud scope at all: there is no tenant to get
+    wrong, and a local `terraform fmt` or `az --version` is legitimate work.
+
+    With cloud scoping disabled (`wrapper` empty) this check allows everything.
     """
     command = tool_input.get("command", "")
+    if not wrapper:
+        return ALLOW
     if NO_GUARD_TOKEN in command.split():
         return ALLOW
     if not cloud_hits(command):
@@ -468,48 +505,48 @@ def _decide_bash(tool_input: dict, active: str, reg: dict) -> Decision:
     scopes = cloud_scopes(reg.get(active, {}))
     if not scopes:
         return Decision("ask",
-                        f"Context '{active}' has no cloud scope (cloudctx: none) but this command "
+                        f"Context '{active}' has no cloud scope (cloudctx: none), but this command "
                         f"calls a cloud CLI. Allow it only if it is local and needs no credentials, "
                         f"such as terraform fmt or az --version.")
     if len(scopes) > 1:
         return Decision("deny",
                         f"Context '{active}' has several cloud scopes ({', '.join(scopes)}). "
                         f"CLAUDE.md section 3: confirm the tenant first, then run "
-                        f"cloudctx exec <name> -- <command>.")
+                        f"{wrapper} exec <name> -- <command>.")
     scope = scopes[0]
     if _starts_with_assignment(command):
         return Decision("deny",
-                        f"This sets an environment variable before the cloud call, and cloudctx "
+                        f"This sets an environment variable before the cloud call, and {wrapper} "
                         f"exec runs its command without a shell, so the rewrite would try to run a "
                         f"program named after the assignment. Use "
-                        f"cloudctx exec {scope} -- env VAR=value <command>, which does work.")
+                        f"{wrapper} exec {scope} -- env VAR=value <command>, which does work.")
     if any(token in _ENV_RESETTING for token in command.split()):
         return Decision("deny",
-                        f"This runs the cloud CLI through sudo or su, which resets the "
-                        f"environment. cloudctx scopes by exporting variables, so the rewrite "
+                        f"This runs the cloud CLI through sudo, which resets the "
+                        f"environment. {wrapper} scopes by exporting variables, so the rewrite "
                         f"would report itself as scoped to '{scope}' while actually running "
-                        f"unscoped. Run it as cloudctx exec {scope} -- <command> without sudo, "
+                        f"unscoped. Run it as {wrapper} exec {scope} -- <command> without sudo, "
                         f"or scope it by hand.")
     # After the two branches above, so each keeps its more specific message, and before
-    # is_simple(), which asks about shape rather than about what the first word is. The
-    # spec only ever rewrites a segment whose own first token is the cloud CLI: everything
-    # else reaches the CLI through another program, and cloudctx exec runs its argv with
-    # no shell, so the wrapper either dies (exec, command, !) or, for env, re-sets the very
-    # variable cloudctx exported and runs unscoped under a message claiming a scope.
+    # is_simple(), which asks about shape rather than about what the first word is. Only a
+    # command whose own first token is the cloud CLI is rewritten: anything else reaches
+    # the CLI through another program, and the wrapper runs its argv with no shell, so the
+    # outer program either dies (exec, command, !) or, for env, re-sets the very variable
+    # the wrapper exported and runs unscoped under a message claiming a scope.
     if _first_token(command) not in CLOUD_COMMANDS:
         return Decision("deny",
                         f"This reaches a cloud CLI through another command, so wrapping the "
-                        f"whole line in cloudctx exec would change what runs: cloudctx executes "
-                        f"its argv directly, with no shell. Put the wrapper inside instead, as "
-                        f"cloudctx exec {scope} -- <wrapper> <cloud command>.")
+                        f"whole line in {wrapper} exec would change what runs: {wrapper} executes "
+                        f"its argv directly, with no shell. Put the other command inside instead, "
+                        f"as {wrapper} exec {scope} -- <command> <cloud command>.")
     if not is_simple(command):
         return Decision("deny",
-                        f"This calls a cloud CLI outside cloudctx, and it is not a single plain "
+                        f"This calls a cloud CLI outside {wrapper}, and it is not a single plain "
                         f"command, so it was not rewritten automatically. Run each cloud call as "
-                        f"cloudctx exec {scope} -- <command>.")
+                        f"{wrapper} exec {scope} -- <command>.")
     return Decision("update",
-                    f"Scoped to cloudctx '{scope}' (CLAUDE.md section 3).",
-                    {"command": f"cloudctx exec {scope} -- {command}"})
+                    f"Scoped to {wrapper} '{scope}' (CLAUDE.md section 3).",
+                    {"command": f"{wrapper} exec {scope} -- {command}"})
 
 
 # Tool name to the field in tool_input holding the path it writes.
@@ -517,13 +554,12 @@ WRITE_TOOLS = {"Write": "file_path", "Edit": "file_path", "NotebookEdit": "noteb
 
 
 def _decide_write(tool_name: str, tool_input: dict, active: str, reg: dict,
-                  root: Path, memory_root: Path) -> Decision:
+                  root: Path, memory_root: Path, iac_root: str = "") -> Decision:
     """Deny a write that lands in a context other than the active one.
 
-    The guard's only hard block, and deny rather than ask because the detection is path
-    arithmetic with no parsing: resolve the target, find the longest home or owns claim
-    that contains it, compare. There is nothing here that can misread a command, so there
-    is no false-positive risk to hedge against.
+    Deny rather than ask because the detection is path arithmetic with no parsing:
+    resolve the target, find the longest home, owns or IaC claim that contains it,
+    compare. Nothing here can misread a command.
     """
     if not active:
         # Without an active context there is no "other" to compare against.
@@ -531,7 +567,7 @@ def _decide_write(tool_name: str, tool_input: dict, active: str, reg: dict,
     target = tool_input.get(WRITE_TOOLS[tool_name], "")
     if not target:
         return ALLOW
-    owner = owner_of(target, reg, root, memory_root)
+    owner = owner_of(target, reg, root, memory_root, iac_root)
     if not owner or owner == active:
         return ALLOW
     return Decision("deny",
@@ -553,15 +589,11 @@ def context_header(active: str, entry: dict) -> str:
     if rules:
         lines.append("Standing rules for this context:")
         lines.extend(f"  - {rule}" for rule in rules)
-    # The prohibition, not a fence, because the prohibition is the actual rule: D1 denies
-    # a write into ANOTHER context's territory and allows everything owned by no context
-    # (.claude, CLAUDE.md, CONTEXTS.md), plus this context's own memory folder, which sits
-    # outside the root entirely. "Write only inside <home>" was narrower than both D1 and
-    # the work the router hands out, and it contradicted standing rules that tell a context
-    # to change workspace files. The paths are still home union owns, not home alone: that
-    # is the set owner_of() lets a write into, and a context may own paths outside its
-    # home. _owned_paths drops a home of "none" already, so a context with neither home
-    # nor owns still gets no line here.
+    # Stated as a prohibition, not a fence, because that is the rule the write check
+    # enforces: a write into ANOTHER context is denied, while files no context owns
+    # (.claude, CLAUDE.md, CONTEXTS.md) and this context's own memory folder are allowed.
+    # The paths listed are home plus owns, since a context may own paths outside its
+    # home. A context with neither gets no line here.
     writable = _owned_paths(entry)
     if writable:
         lines.append(f"Never write into another context's home, handoff or memory folder. "
@@ -599,12 +631,20 @@ def _decide_agent(tool_input: dict, active: str, reg: dict) -> Decision:
 
 
 def decide(tool_name: str, tool_input: dict, active: str, reg: dict,
-           root: Path, memory_root: Path) -> Decision:
-    """The guard's whole decision, as plain data in and plain data out."""
+           root: Path, memory_root: Path, cfg: dict | None = None) -> Decision:
+    """The guard's whole decision, as plain data in and plain data out.
+
+    `cfg` is the parsed .claude/kit.json: its cloud_wrapper names the credential
+    wrapper (or disables the cloud check), and its iac.root lets IaC folders count
+    as owned by their context.
+    """
+    cfg = cfg or {}
     if tool_name in WRITE_TOOLS:
-        return _decide_write(tool_name, tool_input, active, reg, root, memory_root)
+        iac = cfg.get("iac")
+        iac_root = str(iac.get("root") or "") if isinstance(iac, dict) else ""
+        return _decide_write(tool_name, tool_input, active, reg, root, memory_root, iac_root)
     if tool_name == "Bash":
-        return _decide_bash(tool_input, active, reg)
+        return _decide_bash(tool_input, active, reg, cloud_wrapper(cfg))
     if tool_name in AGENT_TOOLS:
         return _decide_agent(tool_input, active, reg)
     return ALLOW

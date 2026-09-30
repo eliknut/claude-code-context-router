@@ -22,6 +22,10 @@ deliberately not contexts, so the drift check stays quiet about them.
 Keep this table only if you have infrastructure as code shared across contexts. `<iac_name>` comes
 from a context's `iac_names`. Resolve folders at activation with
 `find repos/infra -maxdepth 4 -type d -path '*/environments/*' -iname '<iac_name>*'`.
+Set `"iac": {"root": "repos/infra"}` in `.claude/kit.json` and the guard treats each context's
+own `environments/<stage>/<iac_name>*` folders as belonging to that context, even when they sit
+inside a folder another context owns. Do not make the whole infrastructure folder one context's
+`home`: give the shared-code context only the shared parts (the module repo, `_base`).
 
 | Family | Repos | Per-context path | Shared paths (platform context; editing them affects every context in the repo) |
 |---|---|---|---|
@@ -58,10 +62,10 @@ kind: platform
 status: active
 aliases: shared, modules
 cloudctx: none
-home: repos/infra
+home: repos/infra/infra-modules
 iac_names:
 owns:
-  - repos/infra/infra-modules
+  - repos/infra/infra-environments/environments/_base
 rules:
   - name every consumer affected before editing anything shared
 

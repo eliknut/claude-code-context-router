@@ -156,7 +156,7 @@ Everything is new in this case, so there is nothing to preserve and no guard abo
 
 Then offer to write `.claude/kit.json`. Read whatever is already there first (it may hold keys this
 skill does not know about) and merge into it: set or change only the keys today's run actually has
-something to say about, and leave every other key, this run's three included when it has nothing
+something to say about, and leave every other key, this run's four included when it has nothing
 new for them, exactly as it was. Never write a fresh object over an existing file.
 
 - `owner`: their name, so the save trigger says "Open questions for <name>". Skip for a neutral
@@ -166,6 +166,10 @@ new for them, exactly as it was. Never write a fresh object over an existing fil
 - `iac`: only when they have a `<root>/<repo>/environments/<stage>/<name>` layout, an object with
   one key, `root`, naming the folder (relative to this root) that holds those `<repo>` folders, for
   example `{"root": "repos/platform"}`.
+- `cloud_wrapper`: only when they answer that they use no per-context cloud credential wrapper
+  (set `false`, which turns the guard's cloud check off) or use one with another name than
+  `cloudctx` (set that name; it must accept `<name> exec <scope> -- <command>`). Leave it out
+  otherwise: missing means `cloudctx`.
 
 ## 5. Seed the handoffs and the memory index
 

@@ -20,7 +20,7 @@ class CloudScopeTests(unittest.TestCase):
         self.assertEqual(guard.cloud_scopes({"cloudctx": ACME}), ["acme", "acme-labs"])
 
     def test_a_naive_comma_split_would_have_given_four(self):
-        """The regression this parser exists for: most real-world blocks break a naive split."""
+        """The case this parser exists for: most real-world blocks break a naive split."""
         self.assertEqual(len(ACME.split(",")), 4)
         self.assertEqual(len(guard.cloud_scopes({"cloudctx": ACME})), 2)
 
@@ -300,9 +300,9 @@ class ShellTests(unittest.TestCase):
         self.assertFalse(guard.is_simple("az deployment create <<EOF\nx\nEOF"))
 
     def test_an_escaped_quote_cannot_hide_a_second_command(self):
-        """The parser has no backslash awareness, so an escaped quote used to close its
-        quote state early and swallow a real separator. Rewriting that string would have
-        run the second command outside cloudctx."""
+        """The parser has no backslash awareness, so an escaped quote could close its
+        quote state early and swallow a real separator. Rewriting that string would run
+        the second command outside cloudctx."""
         self.assertFalse(guard.is_simple('az foo --query "a\\"b" ; az vm delete --yes'))
 
     def test_an_even_parity_escape_cannot_hide_a_second_command(self):
@@ -391,8 +391,8 @@ class BashDecisionTests(unittest.TestCase):
         self.assertIn("unscoped", d.reason)
 
     def test_a_cloud_call_reached_through_a_wrapper_is_denied_instead_of_being_wrapped(self):
-        """The spec only rewrites a single simple segment whose OWN first token is the
-        cloud CLI. segment_command() looks through wrapper words on purpose, so that
+        """Only a single simple segment whose OWN first token is the cloud CLI is
+        rewritten. segment_command() looks through wrapper words on purpose, so that
         `sudo az ...` is DETECTED, and the rewrite must not inherit that: cloudctx exec
         runs its argv with no shell, so `exec`, `command` and `!` die, and every one of
         these produces a line that does something other than what was typed."""
@@ -410,7 +410,7 @@ class BashDecisionTests(unittest.TestCase):
         """The one wrapper that is not merely broken. cloudctx scopes by exporting
         AZURE_CONFIG_DIR; env re-sets it after cloudctx has, so the rewritten line runs
         against /tmp/x while the hook reports "Scoped to cloudctx 'globex'". A rewrite that
-        claims a scope it does not achieve is the outcome the spec rules out."""
+        claims a scope it does not achieve is worse than no rewrite at all."""
         d = self.decide("env AZURE_CONFIG_DIR=/tmp/x az account show", "globex")
         self.assertEqual(d.action, "deny")
         self.assertNotIn("Scoped to", d.reason)
@@ -507,10 +507,9 @@ class AgentDecisionTests(unittest.TestCase):
         self.assertEqual(self.decide({"prompt": "\n  " + first}, "globex").action, "allow")
 
     def test_a_stale_or_coincidental_context_tag_does_not_suppress_injection(self):
-        """The marker used to be the bare string "[context:", so any prompt starting with
-        it silently skipped injection: another context's header, a stale one from before a
-        switch, or just a prompt opening with a context tag, which this router asks every
-        reply to do."""
+        """A bare "[context:" marker would let any prompt starting with it skip injection:
+        another context's header, a stale one from before a switch, or just a prompt
+        opening with a context tag, which this router asks every reply to do."""
         stale = self.decide({"prompt": "Do the thing"}, "globex").updated_input["prompt"]
         for prompt, active in ((stale, "stub"),
                                ("[context: stub] as discussed\nDo it", "globex"),
@@ -524,8 +523,8 @@ class AgentDecisionTests(unittest.TestCase):
         """umbrella and example-tool both own a path outside their home in this fixture, and the
         guard permits writes there, so a header naming only the home understates the set.
 
-        The line states the prohibition D1 actually enforces and lists the owned paths as
-        information: phrasing it as "write only inside <paths>" was narrower than D1, which
+        The line states the prohibition the write check enforces and lists the owned paths
+        as information: "write only inside <paths>" would be narrower than the check, which
         also allows the workspace files no context owns and this context's own memory."""
         entry = {"home": "clients/umbrella", "owns": ["repos/test-harness"],
                  "cloudctx": "umbrella (Azure, x)", "rules": []}
@@ -544,8 +543,8 @@ class AgentDecisionTests(unittest.TestCase):
 
 
 class QuotedParenthesisTests(unittest.TestCase):
-    """Regression: a parenthesis inside a quoted argument was split on, every piece then
-    failed to parse and was skipped, and the cloud call ran unscoped."""
+    """A parenthesis inside a quoted argument must not be split on: every piece would
+    then fail to parse and be skipped, and the cloud call would run unscoped."""
 
     def decide(self, command):
         return guard.decide("Bash", {"command": command}, "globex", CLOUD_REG,
@@ -581,8 +580,8 @@ class QuotedParenthesisTests(unittest.TestCase):
 
 
 class CaseInsensitivePathTests(TreeFixture, unittest.TestCase):
-    """Regression: on a case-insensitive filesystem (APFS, NTFS) realpath keeps the case
-    it was given, so Clients/Globex slipped past a comparison against clients/globex. The
+    """On a case-insensitive filesystem (APFS, NTFS) realpath keeps the case it was
+    given, so Clients/Globex must not slip past a comparison against clients/globex. The
     detector is patched so the case-insensitive branch runs on any filesystem."""
 
     def setUp(self):
@@ -622,6 +621,129 @@ class CaseDetectorTests(TreeFixture, unittest.TestCase):
         flipped = real.swapcase()
         expected = os.path.exists(flipped) and os.path.samefile(real, flipped)
         self.assertEqual(guard._case_insensitive.__wrapped__(real), expected)
+
+
+class CloudWrapperTests(unittest.TestCase):
+    """kit.json's cloud_wrapper: missing means cloudctx, a string renames it, false disables."""
+
+    def decide(self, command, active="globex", cfg=None):
+        return guard.decide("Bash", {"command": command}, active, CLOUD_REG,
+                            Path("/root"), Path("/memory"), cfg)
+
+    def test_the_default_wrapper_is_cloudctx(self):
+        for cfg in (None, {}, {"cloud_wrapper": None}):
+            with self.subTest(cfg=cfg):
+                d = self.decide("az group list", cfg=cfg)
+                self.assertEqual(d.action, "update")
+                self.assertEqual(d.updated_input["command"],
+                                 "cloudctx exec globex -- az group list")
+
+    def test_a_custom_wrapper_name_is_used_in_the_rewrite_and_the_messages(self):
+        cfg = {"cloud_wrapper": "credwrap"}
+        d = self.decide("az group list", cfg=cfg)
+        self.assertEqual(d.updated_input["command"], "credwrap exec globex -- az group list")
+        self.assertIn("credwrap", d.reason)
+        deny = self.decide("az group list | head", cfg=cfg)
+        self.assertEqual(deny.action, "deny")
+        self.assertIn("credwrap exec globex", deny.reason)
+        self.assertNotIn("cloudctx exec", deny.reason)
+        several = self.decide("az group list", active="acme", cfg=cfg)
+        self.assertIn("credwrap exec <name>", several.reason)
+
+    def test_false_turns_the_cloud_check_off(self):
+        cfg = {"cloud_wrapper": False}
+        for command, active in (("az group list", "globex"), ("az group list", ""),
+                                ("terraform init && terraform plan", "acme"),
+                                ("sudo az account show", "globex")):
+            with self.subTest(command=command, active=active):
+                self.assertEqual(self.decide(command, active=active, cfg=cfg).action, "allow")
+
+    def test_false_leaves_the_other_checks_on(self):
+        d = guard.decide("Agent", {"prompt": "x"}, "globex", RULES_REG, Path("/root"),
+                         Path("/memory"), {"cloud_wrapper": False})
+        self.assertEqual(d.action, "update")
+
+    def test_a_malformed_value_falls_back_to_the_default_rather_than_off(self):
+        for value in ("", "two words", 0, [], {"name": "x"}):
+            with self.subTest(value=value):
+                self.assertEqual(guard.cloud_wrapper({"cloud_wrapper": value}), "cloudctx")
+
+
+EXAMPLE_REGISTRY = Path(__file__).resolve().parents[2] / "CONTEXTS.md"
+
+
+class IacOwnershipTests(unittest.TestCase):
+    """A context's own environment folders inside a shared infrastructure repo."""
+
+    NORTHWIND_TF = "repos/infra/infra-environments/environments/prod/northwind/main.tf"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "root"
+        self.memory = Path(self.tmp.name) / "memory"
+        for rel in ("repos/infra/infra-modules/modules/vnet",
+                    "repos/infra/infra-environments/environments/_base",
+                    "repos/infra/infra-environments/environments/prod/northwind",
+                    "repos/infra/infra-environments/environments/prod/globex-eu",
+                    "clients/northwind", "clients/globex"):
+            (self.root / rel).mkdir(parents=True, exist_ok=True)
+        self.cfg = {"iac": {"root": "repos/infra"}}
+
+    def example(self):
+        """The shipped CONTEXTS.md. In an installed root this file is the user's own
+        registry, so these cases only run while it still holds the examples."""
+        import registry
+        try:
+            reg = registry.contexts(registry.load_registry(EXAMPLE_REGISTRY))
+        except OSError:
+            reg = {}
+        if not {"northwind", "globex", "platform"} <= set(reg):
+            self.skipTest("CONTEXTS.md no longer holds the shipped examples")
+        return reg
+
+    def write(self, rel, active, reg, cfg=None):
+        return guard.decide("Edit", {"file_path": str(self.root / rel)}, active, reg,
+                            self.root, self.memory, self.cfg if cfg is None else cfg)
+
+    def test_the_shipped_example_lets_northwind_edit_its_own_iac_folder(self):
+        reg = self.example()
+        self.assertEqual(self.write(self.NORTHWIND_TF, "northwind", reg).action, "allow")
+        # Also without iac.root: the example no longer hands the whole repo to platform.
+        self.assertEqual(self.write(self.NORTHWIND_TF, "northwind", reg, cfg={}).action, "allow")
+
+    def test_the_shipped_example_denies_another_context_in_northwinds_iac_folder(self):
+        d = self.write(self.NORTHWIND_TF, "globex", self.example())
+        self.assertEqual(d.action, "deny")
+        self.assertIn("northwind", d.reason)
+
+    def test_the_shipped_example_keeps_the_shared_parts_with_platform(self):
+        reg = self.example()
+        for rel in ("repos/infra/infra-modules/modules/vnet/main.tf",
+                    "repos/infra/infra-environments/environments/_base/providers.tf"):
+            with self.subTest(rel=rel):
+                d = self.write(rel, "northwind", reg)
+                self.assertEqual(d.action, "deny")
+                self.assertIn("platform", d.reason)
+
+    def test_an_iac_folder_beats_a_shorter_home_that_contains_it(self):
+        reg = {"platform": {"home": "repos/infra", "owns": []},
+               "northwind": {"home": "clients/northwind", "owns": [], "iac_names": ["northwind"]}}
+        self.assertEqual(self.write(self.NORTHWIND_TF, "northwind", reg).action, "allow")
+        self.assertEqual(self.write("repos/infra/README.md", "northwind", reg).action, "deny")
+
+    def test_an_iac_name_matches_folders_that_start_with_it_in_any_case(self):
+        reg = {"globex": {"home": "clients/globex", "owns": [], "iac_names": ["Globex"]},
+               "northwind": {"home": "clients/northwind", "owns": []}}
+        d = self.write("repos/infra/infra-environments/environments/prod/globex-eu/x.tf",
+                       "northwind", reg)
+        self.assertEqual(d.action, "deny")
+        self.assertIn("globex", d.reason)
+
+    def test_without_an_iac_root_the_iac_folders_are_not_claimed(self):
+        reg = {"platform": {"home": "repos/infra", "owns": []},
+               "northwind": {"home": "clients/northwind", "owns": [], "iac_names": ["northwind"]}}
+        self.assertEqual(self.write(self.NORTHWIND_TF, "northwind", reg, cfg={}).action, "deny")
 
 
 if __name__ == "__main__":

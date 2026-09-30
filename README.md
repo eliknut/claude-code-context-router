@@ -1,53 +1,192 @@
-# Context router kit
+# claude-code-context-router
 
-One folder, many contexts. Claude Code resolves which context you are in before it does anything,
-loads that context's notes and handoff, keeps its writes and cloud commands inside that context,
-and writes the handoff back when you stop.
+If you use Claude Code for several clients, codebases and side projects from one machine, things
+bleed. A session started for one client edits another client's files, runs `az` against whatever
+tenant happens to be logged in, and forgets on Monday what you were halfway through on Friday.
+This kit fixes that with one project root folder and one rule: every session belongs to exactly one
+context. Claude resolves the context from your first message, loads only that context's notes and
+handoff, keeps writes and cloud commands inside it, and writes a handoff when you stop.
 
-A context is anything you switch between: a client, a shared codebase, an internal tool, a
-personal project. Each one is a block in `CONTEXTS.md` with a name, aliases, a home folder, an
-optional cloud scope and its own standing rules.
+Plain files and hooks: a `CLAUDE.md` router, a `CONTEXTS.md` registry, stdlib Python and bash.
 
-Standard library Python (3.9 or newer) and bash. No dependencies.
+## Quickstart
+
+```
+gh repo clone eliknut/claude-code-context-router   # or: git clone https://github.com/eliknut/claude-code-context-router
+cd claude-code-context-router
+./install.sh --root ~/work            # dry run: prints the plan, writes nothing
+./install.sh --root ~/work --apply    # writes it
+cd ~/work && claude                   # hooks load at startup
+> set up my contexts                  # runs the context-bootstrap skill on your folders
+> northwind: check the deploy         # reply starts with [northwind]
+```
+
+`~/work` is any existing folder that holds your work. It must not be your home directory.
 
 ## How it works
 
 ```
  session starts in <root>
         |
-        v
  SessionStart hook ----> prints registry digest (names + aliases) and recent handoffs
         |
- first message: "northwind deploy"
+ first message: "northwind: check the deploy"
         |
-        v
  CLAUDE.md router ----> resolve: one match? activate. none or several? ask.
         |
-        v
- activate: read block in CONTEXTS.md -> <home>/CLAUDE.md -> <home>/HANDOFF.md
+ activate: read the block in CONTEXTS.md -> <home>/CLAUDE.md -> <home>/HANDOFF.md
            -> memory/contexts/<ctx>/INDEX.md -> set_context.sh writes the marker
         |
-        v
  every tool call ----> PreToolUse context_guard.py (reads the marker)
-        |                 Write/Edit into another context's folder ... deny
-        |                 bare az/aws/terraform/terragrunt ........... rewrite to
-        |                                                  cloudctx exec <scope> -- <cmd>
-        |                 Agent/Task prompt .......................... context block prepended
-        v
+        |                 Write/Edit into another context ........ deny
+        |                 bare az/aws/terraform/terragrunt ....... rewrite to
+        |                                              cloudctx exec <scope> -- <cmd>
+        |                 Agent/Task prompt ...................... context block prepended
+        |
  "done for today" ---> UserPromptSubmit hook prints SAVE TRIGGER, Claude rewrites HANDOFF.md
         |
  session ends -------> SessionEnd hook logs a line under Recent in the handoff
 ```
 
-## Layout
+The marker is a one-line file under `~/.claude/ctx-state/<session_id>` holding the context name.
+The hooks and the optional status line read it.
+
+## Example session
+
+```
+$ cd ~/work && claude
+
+> northwind: check the deploy
+
+[northwind]
+In flight: moving the app service plan to the new region.
+Next: run the plan for prod and compare with last week's.
+Blocked: nothing.
+Recommended: start with the plan for prod.
+
+  Bash  az webapp list -g nw-prod
+        Scoped to cloudctx 'northwind' (CLAUDE.md section 3).
+        ran: cloudctx exec northwind -- az webapp list -g nw-prod
+
+> also fix the typo in globex's runbook
+
+  Edit  clients/globex/docs/runbook.md
+        denied: clients/globex/docs/runbook.md belongs to context 'globex', but
+        'northwind' is the active context. Switch context first, or write inside 'northwind'.
+
+[northwind] That file belongs to globex. Want me to switch to globex for it?
+
+> no, done for today
+
+[northwind] Handoff written to clients/northwind/HANDOFF.md: the prod plan is next, nothing blocked.
+```
+
+## Make CONTEXTS.md yours
+
+`CONTEXTS.md` ships with four example contexts (`northwind`, `globex`, `platform`, `sideproject`).
+The `context-bootstrap` skill replaces them with yours. To do it by hand, delete the examples and
+write one block per context below the `<!-- registry -->` line:
+
+```
+## northwind                                  the name: one token, no spaces
+kind: client                                  any category you like
+status: active                                active, dormant, stub, ... your choice
+aliases: nw, northwind traders                what you actually say; comma separated
+cloudctx: northwind (Azure, prod tenant)      scope name(s) for the wrapper, or none
+home: clients/northwind                       folder relative to the root, or none
+iac_names: northwind                          folder names under environments/<stage>/
+owns:                                         extra folders this context owns
+  - repos/northwind-app
+rules:                                        standing rules Claude must follow here
+  - read-only by default; changes need explicit approval
+```
+
+- **Aliases resolve case-insensitively** against the block name and every alias. One match
+  activates it. No match or several: Claude asks one short question. A name it does not know
+  starts the `new-context` skill after you confirm.
+- **Several scopes** (`cloudctx: globex (AWS, prod), globex-dev (AWS, dev)`) make Claude confirm
+  which one before the first cloud call. The text in parentheses is a note for you.
+- **Ownership** is `home` plus `owns`. The longest matching path wins, so `clients` and
+  `clients/acme` can both be homes.
+- **IaC folders.** With `"iac": {"root": "repos/infra"}` in `.claude/kit.json`, each context also
+  owns its own `repos/infra/<repo>/environments/<stage>/<iac_name>*` folders. Give the shared-code
+  context only the shared parts (the module repo, `environments/_base`), not the whole
+  infrastructure folder.
+- **The `ignore` block** at the end lists folders that are deliberately not contexts
+  (`paths: scratch, archive`), so the drift check stays quiet about them.
+
+Check the registry at any time with `python3 .claude/scripts/registry_check.py`.
+
+## If you do not use cloud CLIs or cloudctx
+
+[cloudctx](https://github.com/eliknut/cloudctx) gives each terminal window its own Azure or AWS CLI
+identity, so a command scoped to one client cannot reach another. The guard rewrites bare cloud
+calls to go through it. If you do not want that, set `cloud_wrapper` in `.claude/kit.json`:
+
+```json
+{ "cloud_wrapper": false }
+```
+
+`false` turns the cloud check off; everything else in the guard keeps working. Then delete section
+3 ("Scoped commands") of your `CLAUDE.md`, and set `cloudctx: none` in every block (or leave the
+line out). If you use a different wrapper, give its name instead, for example
+`{ "cloud_wrapper": "awsctx" }`. It must accept `<name> exec <scope> -- <command>`. Missing means
+`cloudctx`.
+
+## The guard: what it catches and what it does not
+
+`.claude/hooks/context_guard.py` runs before every `Write`, `Edit`, `NotebookEdit`, `Bash`, `Agent`
+and `Task` call. It does three checks:
+
+- **Write check.** A `Write`, `Edit` or `NotebookEdit` into another context's home, owned folders
+  or memory folder is denied. Paths are resolved through symlinks and compared case-insensitively
+  on macOS and Windows. Files no context owns (`CLAUDE.md`, `CONTEXTS.md`, `.claude/`) are allowed.
+- **Cloud check.** A bare `az`, `aws`, `terraform` or `terragrunt` call that is one plain command
+  is rewritten to `cloudctx exec <scope> -- <command>`. Anything it cannot rewrite safely is denied
+  with the scoped form to use instead: pipes, `&&`, substitutions, redirects, a leading
+  `VAR=value`, `sudo`, wrappers like `time` or `env`, a context with several scopes, or no active
+  context. For a context with `cloudctx: none` it asks. Put `#noctx` in a command as its own word
+  to run it unscoped on purpose.
+- **Subagent check.** A delegated subagent starts blank, so the active context's block (home,
+  scope, standing rules, the no-cross-writes rule) is prepended to its prompt. Forks are skipped.
+
+What it does **not** catch, so the rules in `CLAUDE.md` still matter:
+
+- Writes made through Bash: `cat > file`, `cp`, `mv`, `sed -i`, a python heredoc.
+- A cloud CLI inside a quoted string (`bash -c '...'`, `su -c '...'`), inside a script file, or
+  behind an alias or shell function.
+- Anything run outside Claude Code's tools.
+- Its own errors: every failure inside the guard fails open (one line to stderr, call allowed),
+  because a broken guard must never stop work.
+
+It is a safety net for the shapes an agent usually emits, not a sandbox.
+
+## Customising
+
+Your `CLAUDE.md` is yours after install. Section 8 is an empty slot for rules that hold in every
+context. Add what you care about, for example:
+
+```
+## 8. Conventions that apply everywhere
+- Commit messages in the imperative, under 72 characters; reference the ticket as PROJ-123.
+- Answer first in one line, then at most three bullets. Detail only when I ask.
+- Never write client names into shared repositories.
+```
+
+Add more numbered sections after it as needed. Per-context rules go in the block's `rules` or in
+`<home>/CLAUDE.md`. Save phrases ("done for today", ...) live in `.claude/hooks/save-phrases.txt`,
+one per line, in any language. `.claude/kit.json` also takes `owner` (your name in the handoff's
+"Open questions for ..." heading) and `scanned_parents` (the folders the drift check scans).
+
+## File layout
 
 ```
 install.sh            installer (dry run by default)
-VERSION
+VERSION, CHANGELOG.md
 template/
   CLAUDE.md           the router: resolve, activate, scope, where writes go, handoff
   CONTEXTS.md         registry: example contexts, an ignore block, an example IaC layout table
-  kit.json.example    optional config
+  kit.json.example    seeded as .claude/kit.json
   statusline.sh       optional status line showing the active context
   .claude/
     settings.json     hook wiring (SessionStart, UserPromptSubmit, SessionEnd, PreToolUse)
@@ -56,128 +195,56 @@ template/
     lib/              rootpath.py, registry.py, handoff.py, guard.py
     scripts/          set_context.sh, registry_check.py
     skills/           context-bootstrap, new-context
-    tests/            unittest suite for all of the above
+    tests/            test suite for all of the above
 ```
 
-Nothing hardcodes a path. `rootpath.py` derives the root from `CLAUDE_PROJECT_DIR` or from its
-own location, and the memory folder from the root, the same way Claude Code names it.
+Per context, at run time: `<home>/CLAUDE.md`, `<home>/HANDOFF.md`, and a memory folder at
+`~/.claude/projects/<root slug>/memory/contexts/<ctx>/`. Nothing hardcodes a path: `rootpath.py`
+derives the root from `CLAUDE_PROJECT_DIR` or from its own location.
 
-## The guard
+## Updating
 
-`.claude/hooks/context_guard.py` runs before every `Write`, `Edit`, `NotebookEdit`, `Bash`,
-`Agent` and `Task` call. All decisions are pure functions in `.claude/lib/guard.py`.
-
-- **Cross-context writes.** A write whose target (resolved through symlinks) sits in another
-  context's `home` or `owns` folders, or in another context's memory folder, is denied. Files
-  that no context owns (`CLAUDE.md`, `CONTEXTS.md`, `.claude/`) are allowed.
-- **Cloud CLI scoping.** A bare `az`, `aws`, `terraform` or `terragrunt` call that is one plain
-  command is rewritten to `cloudctx exec <scope> -- <command>`. Anything it cannot rewrite
-  safely is denied with the scoped form to use instead: pipes, substitutions, redirects, a
-  leading `VAR=value`, `sudo`, wrappers like `time` or `env`, a context with several scopes, or
-  no active context. For a context with `cloudctx: none` it asks. `#noctx` as a bare token
-  opts one command out.
-- **Subagent briefing.** A delegated subagent starts blank, so the active context's block (home,
-  scope, standing rules, the no-cross-writes rule) is prepended to its prompt. Forks are skipped.
-
-`cloudctx` is the per-context credential wrapper: any command that runs one command with one
-context's credentials exported and nothing else leaking in. If yours has another name, change
-the rewrite in `guard.py` and section 3 of `CLAUDE.md`.
-
-What it does not catch: it is a safety net for the shapes an agent usually emits, not a sandbox.
-A write made through Bash (`cat >`, `mv`, `cp`, a python heredoc) is not checked. A cloud CLI
-reached inside a quoted string (`bash -c '...'`, `su -c '...'`) or through a script file is not
-seen. Every error inside the guard fails open: the hook logs one line to stderr and allows the
-call, because a broken guard must never stop work. The rules in `CLAUDE.md` bind either way.
-
-## Instructions for Claude
-
-If you are reading this because someone asked for a smarter way of working with their folder,
-do these in order, and do not go past the confirmation step until they answer.
-
-1. Ask which folder should become the project root, unless they have already said. It must not
-   be their home directory. Everything below happens inside it.
-2. Work from a temporary directory, not the folder that is about to become the project root:
-   `cd $(mktemp -d)`.
-3. Download the latest release archive of this repository (replace `<owner>` with the account
-   that hosts it):
-   `gh release download --repo <owner>/context-router-kit --pattern '*.tar.gz'`
-   Without `gh`, take the archive link from the repository's latest release page.
-4. Check it: `shasum -a 256 context-router-kit-*.tar.gz` and compare with the sha256 published
-   on that release. If it does not match, stop and tell them.
-5. Unpack it: `tar -xzf context-router-kit-*.tar.gz`
-6. Show them what would change, writing nothing:
-   `./context-router-kit-<version>/install.sh --root <their root>`
-7. Wait for a yes. Do not apply on your own judgement.
-8. On a yes: add `--apply` to the same command. Add `--statusline` too if they want the status
-   line; it is the only thing the installer writes outside the root.
-9. Tell them to restart Claude Code in that folder, because hooks load at startup.
-10. In the new session, run the `context-bootstrap` skill. It inventories their folders, asks
-    what each one is, and writes their registry.
-
-Do not install into a folder they did not name. Do not skip the confirmation step.
-
-## Install
-
-The installer refuses to run under a `python3` older than 3.9, and refuses a root that is your
-home directory: it is meant for one folder among several, not the whole of it.
+Pull the repo (or check out a newer tag) and run the installer again, dry run first:
 
 ```
-./install.sh --root /path/to/your/root          # show the plan, write nothing
-./install.sh --root /path/to/your/root --apply  # write it
+git pull && ./install.sh --root ~/work && ./install.sh --root ~/work --apply
 ```
 
-`--root` alone is a dry run: it prints what would change and writes nothing. Nothing is written
-until you add `--apply`. Add `--statusline` (with `--apply`) to also install a status line that
-shows the active context, the only thing the installer writes outside the root. Add `--force` to
-overwrite a file you already own, such as an existing `CLAUDE.md` or an existing status line
-entry; without it, a file you own is only ever seeded when absent, never replaced.
+- **Replaced** on every install, previous copy saved under `.claude/.kit-backup/<timestamp>/`
+  with a restore command printed: the kit's own files in `.claude/hooks/*.py`, `.claude/lib`,
+  `.claude/scripts`, `.claude/tests`, the two kit skills in `.claude/skills`, and the four kit
+  hook entries in `.claude/settings.json`.
+- **Seeded when absent, never replaced**: `CLAUDE.md`, `CONTEXTS.md`,
+  `.claude/hooks/save-phrases.txt`. `--force` replaces these three, with a backup.
+- **Never replaced, not even with `--force`**: `.claude/kit.json`.
+- **Never touched**: your handoffs, your memory folders, your own skills and hooks, and every
+  other key in `.claude/settings.json`, permissions included.
 
-Exit code 0 means it ran clean, 1 means it refused (for example, the root does not exist, or is
-your home directory), 2 means a usage error (a missing or unknown argument).
+Since `CLAUDE.md` is never replaced, compare it with `template/CLAUDE.md` after an upgrade.
+`CHANGELOG.md` says what changed in each version.
 
-Then start Claude Code in that root, because hooks load at startup, and ask it to run the
-`context-bootstrap` skill. It inventories your folders, asks what each one is, and writes your
-registry. Without that step the machinery is installed but has nothing to route.
+Installer exit codes: 0 ran clean, 1 refused (root missing, root is your home directory, python
+too old, unmergeable settings.json), 2 usage error.
 
-## What the installer owns
+## Installing through Claude
 
-Replaced on every install, with the previous copy saved under `.claude/.kit-backup/<timestamp>/`,
-and a ready-to-paste restore command printed alongside it: `.claude/hooks/*.py`, `.claude/lib`,
-`.claude/scripts`, `.claude/skills`, `.claude/tests`, and the four hook entries in
-`.claude/settings.json`.
+If you asked Claude Code to set this up for you, Claude should do this, in order, and not go past
+step 4 without your yes:
 
-Seeded when absent and never overwritten: `CLAUDE.md`, `CONTEXTS.md`, `.claude/kit.json`,
-`.claude/hooks/save-phrases.txt` (it lives inside `.claude/hooks`, but it is yours, not the kit's),
-and everything else in `.claude/settings.json`, permissions included.
+1. Ask which folder becomes the project root, unless you already said. Never the home directory.
+2. Clone the release into a temporary directory, not into the root:
+   `git clone --depth 1 --branch v2.0.1 https://github.com/eliknut/claude-code-context-router "$(mktemp -d)/kit"`
+3. Show the plan, writing nothing: `<clone>/install.sh --root <root>`
+4. Wait for a yes. On a yes, run it again with `--apply` (plus `--statusline` if you want the
+   status line, the only thing written outside the root).
+5. Tell you to restart Claude Code in the root, then say "set up my contexts".
 
-## Configuration
+## Requirements
 
-`.claude/kit.json`, all three keys optional:
+- Claude Code with hooks (`SessionStart`, `UserPromptSubmit`, `SessionEnd`, `PreToolUse`).
+- Python 3.9 or newer as `python3`, and bash. No packages.
+- macOS or Linux.
+- Optional: [cloudctx](https://github.com/eliknut/cloudctx), or any wrapper with the same
+  `exec <scope> -- <command>` shape.
 
-```json
-{ "owner": "your name", "scanned_parents": ["clients", "repos"], "iac": { "root": "repos/infra" } }
-```
-
-`owner` puts your name in the save trigger. `scanned_parents` limits the drift check to the folders
-worth scanning. `iac` enables the infrastructure checks, and only makes sense if you have a
-`<root>/<repo>/environments/<stage>/<name>` layout.
-
-## Upgrading from 1.x
-
-2.0.0 adds the guard (`hooks/context_guard.py`, `lib/guard.py`, their tests) and the
-`PreToolUse` hook entry; the installer adds all of them. The registry key for cloud scope is now
-`cloudctx`; the guard still reads the older `cloud` key. Your `CLAUDE.md` is never overwritten,
-so compare its sections 3 and 4 with `template/CLAUDE.md`; the installer prints a note when yours
-does not mention the guard.
-
-## Your own conventions
-
-Section 8 of `template/CLAUDE.md` is an empty slot for rules that hold in every context: commit
-and PR conventions, ticket references, writing style, how you want answers shaped. Append further
-sections after it as needed.
-
-## Tests
-
-```
-cd .claude/tests && python3 -m unittest discover -p 'test_*.py'
-```
+Run the tests with `python3 -m unittest discover -s .claude/tests -p 'test_*.py'` from your root.

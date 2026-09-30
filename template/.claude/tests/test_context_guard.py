@@ -73,7 +73,7 @@ class EmitTests(unittest.TestCase):
         self.assertEqual(updated["timeout"], 120)
 
     def test_update_on_an_agent_call_keeps_subagent_type_and_model(self):
-        """The D3 shape of the same risk: the decision rewrites `prompt`, and losing
+        """The subagent check has the same risk: the decision rewrites `prompt`, and losing
         subagent_type would silently send the work to a different agent."""
         tool_input = {"prompt": "do the thing", "subagent_type": "general-purpose",
                       "model": "opus", "description": "the thing"}
@@ -101,8 +101,7 @@ class EmitTests(unittest.TestCase):
         (code.claude.com/docs/en/agent-sdk/hooks). Adding "allow" here would suppress the
         confirmation prompt for the rewritten command; omitting it lets the user's own
         permission rules decide, evaluated against the rewritten input rather than what
-        Claude proposed. Do not "fix" this by adding the field: a review already raised it
-        as a Critical and it was rejected against primary documentation.
+        Claude proposed. Do not "fix" this by adding the field.
         """
         out = emitted(guard.Decision("update", "Scoped to cloudctx 'globex'.", {"command": "x"}),
                       {"command": "az account show"})
@@ -191,7 +190,7 @@ class ScriptTests(unittest.TestCase):
         return proc
 
     def test_a_null_command_fails_open_silently(self):
-        """Task 5 left {"command": None} raising on purpose, for this wrapper to catch.
+        """guard.decide() raises on {"command": None}, and main() must catch it.
         Exit 0 and nothing on stdout, so the call is neither blocked nor rewritten."""
         proc = self.run_hook(json.dumps({"session_id": "sess", "tool_name": "Bash",
                                          "tool_input": {"command": None}}))
@@ -236,12 +235,12 @@ class ScriptTests(unittest.TestCase):
         self.assertEqual(proc.stderr, "")
 
     def test_a_write_into_another_contexts_memory_is_denied_end_to_end(self):
-        """D1's memory clause, through the real hook and the real rootpath.memory_dir().
+        """The write check's memory clause, through the real hook and the real rootpath.memory_dir().
 
         The clause is unit tested against a fabricated memory root, so nothing else checks
         that memory_dir()'s slug agrees with the path the guard is handed. If the two ever
-        drift, no memory path is ever recognised as memory: D1 allows instead of denying,
-        silently, with no error, and customer memory stops being protected. Hence the real
+        drift, no memory path is ever recognised as memory: the check allows instead of
+        denying, silently, with no error, and another context's memory stops being protected. Hence the real
         function here rather than a path spelled out by hand, computed under the same HOME
         and CLAUDE_PROJECT_DIR the hook process gets.
         """
@@ -277,6 +276,33 @@ class ScriptTests(unittest.TestCase):
         self.assertEqual(updated["description"], "Show the signed in account")
         self.assertEqual(updated["timeout"], 120)
 
+
+    def write_kit_json(self, data):
+        (self.root / ".claude").mkdir(exist_ok=True)
+        (self.root / ".claude" / "kit.json").write_text(json.dumps(data), encoding="utf-8")
+
+    def bash(self, command):
+        return self.run_hook(json.dumps({"session_id": "sess", "tool_name": "Bash",
+                                         "tool_input": {"command": command}}))
+
+    def test_kit_json_names_a_custom_wrapper_end_to_end(self):
+        self.write_kit_json({"cloud_wrapper": "credwrap"})
+        proc = self.bash("az account show")
+        self.assertEqual(proc.stderr, "")
+        updated = json.loads(proc.stdout)["hookSpecificOutput"]["updatedInput"]
+        self.assertEqual(updated["command"], "credwrap exec acme -- az account show")
+
+    def test_kit_json_false_turns_the_cloud_check_off_end_to_end(self):
+        self.write_kit_json({"cloud_wrapper": False})
+        proc = self.bash("az account show")
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stdout, "")
+        self.assertEqual(proc.stderr, "")
+
+    def test_kit_json_without_the_key_keeps_cloudctx_end_to_end(self):
+        self.write_kit_json({"owner": "someone"})
+        updated = json.loads(self.bash("az account show").stdout)["hookSpecificOutput"]["updatedInput"]
+        self.assertEqual(updated["command"], "cloudctx exec acme -- az account show")
 
 if __name__ == "__main__":
     unittest.main()
