@@ -7,9 +7,11 @@ this (hooks/context_guard.py) does all the IO.
 from __future__ import annotations
 
 import collections
+import functools
 import os
 import re
 import shlex
+import sys
 from pathlib import Path
 
 # action is one of: allow, deny, ask, update.
@@ -75,6 +77,31 @@ def _owned_paths(entry: dict) -> list[str]:
     return paths
 
 
+@functools.lru_cache(maxsize=None)
+def _case_insensitive(path: str) -> bool:
+    """Whether the filesystem holding `path` ignores case, as APFS and NTFS do by default.
+
+    realpath() does not normalise case, so on such a filesystem "Clients/Globex" and
+    "clients/globex" are the same directory under two spellings, and a plain string
+    comparison lets a write into another context's home through by spelling it
+    differently. Detected by asking whether the path with its case flipped names the
+    same directory. A path with no letters, or one that does not exist, cannot be
+    probed; on darwin and win32 that falls back to True, the default there, because a
+    wrong True costs a spurious deny while a wrong False reopens the bypass.
+    """
+    flipped = path.swapcase()
+    if flipped != path and os.path.exists(path):
+        try:
+            return os.path.exists(flipped) and os.path.samefile(path, flipped)
+        except OSError:
+            pass
+    return sys.platform in ("darwin", "win32")
+
+
+def _fold(text: str, fold: bool) -> str:
+    return text.casefold() if fold else text
+
+
 def owner_of(target: str, reg: dict, root: Path, memory_root: Path) -> str:
     """The context that owns `target`, or "" when no context does.
 
@@ -86,23 +113,36 @@ def owner_of(target: str, reg: dict, root: Path, memory_root: Path) -> str:
     real = Path(os.path.realpath(target))
 
     contexts_dir = Path(os.path.realpath(str(memory_root))) / "contexts"
-    try:
-        rel = real.relative_to(contexts_dir)
-    except ValueError:
-        pass
-    else:
-        return rel.parts[0] if rel.parts else ""
+    fold = _case_insensitive(str(contexts_dir.parent))
+    # Compared part by part, casefolded when the filesystem ignores case, so that
+    # "Contexts/Globex" cannot pass for somewhere other than contexts/globex.
+    real_parts = [_fold(p, fold) for p in real.parts]
+    base = [_fold(p, fold) for p in contexts_dir.parts]
+    if real_parts[:len(base)] == base:
+        if len(real.parts) == len(base):
+            return ""
+        name = real.parts[len(base)]
+        if fold:
+            # Map the spelling on the path back to the registry's own spelling, so the
+            # active context's own memory folder still compares equal to its name.
+            for known in reg:
+                if known.casefold() == name.casefold():
+                    return known
+        return name
 
-    try:
-        rel = real.relative_to(Path(os.path.realpath(str(root))))
-    except ValueError:
+    root_real = Path(os.path.realpath(str(root)))
+    fold = _case_insensitive(str(root_real))
+    base = [_fold(p, fold) for p in root_real.parts]
+    real_parts = [_fold(p, fold) for p in real.parts]
+    if real_parts[:len(base)] != base:
         return ""
-    relative = rel.as_posix()
+    relative = "/".join(real_parts[len(base):])
 
     best = ""
     best_length = -1
     for name, entry in reg.items():
         for claimed in _owned_paths(entry):
+            claimed = _fold(claimed, fold)
             if relative == claimed or relative.startswith(claimed + "/"):
                 if len(claimed) > best_length:
                     best, best_length = name, len(claimed)
@@ -116,9 +156,12 @@ NO_GUARD_TOKEN = "#noctx"
 # a false "not simple" costs one permission prompt, a false "simple" corrupts a command.
 _NOT_SIMPLE = ("$(", "`", "<<", ">", "<", "&", "(", ")", "\\")
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-# A shell starts a fresh command after each of these, so the invocation that follows is
-# not the segment's first token. Used to split a segment further, not to split a command.
-_COMMAND_POSITION = re.compile(r"\$\(|`|\(|\)")
+# Markers from _NOT_SIMPLE that only mean something to the shell outside quotes. Inside
+# quotes they are literal text, as in the JMESPath `--query "[?contains(name,'web')]"`,
+# so is_simple() looks for them in the unquoted text only. $( , a backtick and a
+# backslash stay in _NOT_SIMPLE's checks on the whole string: they are live inside
+# double quotes, and rejecting them inside single quotes too is merely conservative.
+_UNQUOTED_ONLY = ("<<", ">", "<", "&", "(", ")")
 # Words that can precede the real command without being it. Not exhaustive, and it
 # does not need to be: a word we fail to skip costs a missed hit, which is the same
 # position we are in today with no guard at all.
@@ -219,6 +262,100 @@ def _parses(text: str) -> bool:
     return True
 
 
+def _command_position_parts(segment: str) -> list[str]:
+    """Split a segment wherever the shell starts a fresh command: $( , a backtick, ( and ).
+
+    Quote-aware. A parenthesis inside quotes is literal, and splitting on it cut
+    `az vm list --query "[?contains(name,'web')]"` into pieces that no longer parsed, so
+    every piece was skipped and the call ran unscoped. Command substitution is still
+    live inside double quotes, so $( and a backtick there open a fresh, unquoted
+    context, and the quote state from before it is restored when it closes.
+    """
+    parts: list[str] = []
+    current = ""
+    quote = ""
+    # One frame per open ( , $( or backtick: the frame's kind and the quote state
+    # it interrupted.
+    stack: list[tuple[str, str]] = []
+    i = 0
+    while i < len(segment):
+        ch = segment[i]
+        if quote == "'":
+            current += ch
+            if ch == "'":
+                quote = ""
+            i += 1
+            continue
+        if ch == "\\":
+            current += segment[i:i + 2]
+            i += 2
+            continue
+        if quote == '"' and ch == '"':
+            current += ch
+            quote = ""
+            i += 1
+            continue
+        if segment.startswith("$(", i):
+            parts.append(current)
+            current = ""
+            stack.append(("(", quote))
+            quote = ""
+            i += 2
+            continue
+        if ch == "`":
+            parts.append(current)
+            current = ""
+            if stack and stack[-1][0] == "`":
+                quote = stack.pop()[1]
+            else:
+                stack.append(("`", quote))
+                quote = ""
+            i += 1
+            continue
+        if quote == '"':
+            current += ch
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+            current += ch
+            i += 1
+            continue
+        if ch == "(":
+            parts.append(current)
+            current = ""
+            stack.append(("(", ""))
+            i += 1
+            continue
+        if ch == ")":
+            parts.append(current)
+            current = ""
+            if stack and stack[-1][0] == "(":
+                quote = stack.pop()[1]
+            i += 1
+            continue
+        current += ch
+        i += 1
+    parts.append(current)
+    return parts
+
+
+def _unquoted_text(command: str) -> str:
+    """The command with the contents of every quoted string removed, quotes included."""
+    out = ""
+    quote = ""
+    for ch in command:
+        if quote:
+            if ch == quote:
+                quote = ""
+            continue
+        if ch in "'\"":
+            quote = ch
+            continue
+        out += ch
+    return out
+
+
 def cloud_hits(command: str) -> list[str]:
     """Segments that invoke a cloud CLI without going through cloudctx.
 
@@ -238,7 +375,12 @@ def cloud_hits(command: str) -> list[str]:
             if segment_command(segment) in CLOUD_COMMANDS:
                 hits.append(segment)
             continue
-        for part in _COMMAND_POSITION.split(segment):
+        if segment_command(segment) in CLOUD_COMMANDS:
+            # The segment as a whole already runs a cloud CLI. Recorded before splitting,
+            # because a split can only lose this hit, never find a better one.
+            hits.append(segment)
+            continue
+        for part in _command_position_parts(segment):
             if not part.strip():
                 continue
             if not _parses(part):
@@ -259,8 +401,11 @@ def is_simple(command: str) -> bool:
     """True when wrapping the whole command in cloudctx exec is safe."""
     if len(split_segments(command)) != 1:
         return False
-    if any(marker in command for marker in _NOT_SIMPLE):
-        return False
+    unquoted = _unquoted_text(command)
+    for marker in _NOT_SIMPLE:
+        haystack = unquoted if marker in _UNQUOTED_ONLY else command
+        if marker in haystack:
+            return False
     # Sound only because a backslash is rejected above: with no escapes in play, an odd
     # quote count means a quote this parser never closed, so a separator may have been
     # swallowed and the single-segment result cannot be trusted.

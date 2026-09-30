@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
@@ -540,6 +541,87 @@ class AgentDecisionTests(unittest.TestCase):
     def test_the_original_prompt_survives_verbatim(self):
         d = self.decide({"prompt": "line one\nline two"}, "globex")
         self.assertIn("line one\nline two", d.updated_input["prompt"])
+
+
+class QuotedParenthesisTests(unittest.TestCase):
+    """Regression: a parenthesis inside a quoted argument was split on, every piece then
+    failed to parse and was skipped, and the cloud call ran unscoped."""
+
+    def decide(self, command):
+        return guard.decide("Bash", {"command": command}, "globex", CLOUD_REG,
+                            Path("/root"), Path("/memory"))
+
+    def test_a_jmespath_function_in_a_quoted_query_is_rewritten_not_allowed(self):
+        for command in ("az vm list --query \"[?contains(name,'web')]\"",
+                        'aws ec2 describe-instances --query "length(Reservations)"',
+                        "aws ec2 describe-instances --query 'sort_by(Reservations, &LaunchTime)'",
+                        'terraform output -json "lookup(x)"',
+                        'terragrunt run-all plan --terragrunt-include-dir "(a)"'):
+            with self.subTest(command=command):
+                d = self.decide(command)
+                self.assertEqual(d.action, "update")
+                self.assertEqual(d.updated_input["command"], f"cloudctx exec globex -- {command}")
+
+    def test_a_genuine_subshell_or_substitution_is_still_caught(self):
+        for command in ("(az account show)", "$(az account show)", "echo $(az account show)",
+                        "echo `az account show`",
+                        'echo "$(az account show --query "length(x)")"',
+                        'cd x && (terraform plan)'):
+            with self.subTest(command=command):
+                self.assertEqual(self.decide(command).action, "deny")
+
+    def test_a_cloud_name_inside_literal_quoted_text_is_not_a_hit(self):
+        for command in ('echo "deploying terraform (prod)"', "echo '$(az account show)'",
+                        'git commit -m "fix (az) query"'):
+            with self.subTest(command=command):
+                self.assertEqual(self.decide(command).action, "allow")
+
+    def test_a_quoted_parenthesis_does_not_hide_an_unquoted_redirection(self):
+        self.assertEqual(self.decide('az vm list --query "length(x)" > out.json').action, "deny")
+
+
+class CaseInsensitivePathTests(TreeFixture, unittest.TestCase):
+    """Regression: on a case-insensitive filesystem (APFS, NTFS) realpath keeps the case
+    it was given, so Clients/Globex slipped past a comparison against clients/globex. The
+    detector is patched so the case-insensitive branch runs on any filesystem."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(guard, "_case_insensitive", lambda path: True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def decide(self, target, active="acme"):
+        return guard.decide("Write", {"file_path": str(target)}, active, REG, self.root, self.memory)
+
+    def test_another_contexts_home_in_any_case_is_denied(self):
+        for rel in ("Clients/Globex/x.md", "CLIENTS/GLOBEX/x.md", "clients/Globex/x.md"):
+            with self.subTest(rel=rel):
+                d = self.decide(self.root / rel)
+                self.assertEqual(d.action, "deny")
+                self.assertIn("'globex'", d.reason)
+
+    def test_the_active_contexts_own_home_in_another_case_is_allowed(self):
+        self.assertEqual(self.decide(self.root / "Clients/Acme/x.md").action, "allow")
+
+    def test_another_contexts_memory_in_any_case_is_denied(self):
+        self.assertEqual(self.decide(self.memory / "Contexts" / "Globex" / "x.md").action, "deny")
+
+    def test_the_active_contexts_own_memory_in_another_case_is_allowed(self):
+        self.assertEqual(self.decide(self.memory / "contexts" / "ACME" / "x.md").action, "allow")
+
+    def test_a_case_sensitive_filesystem_keeps_the_exact_comparison(self):
+        with mock.patch.object(guard, "_case_insensitive", lambda path: False):
+            self.assertEqual(self.owner("Clients/Globex/x.md"), "")
+
+
+
+class CaseDetectorTests(TreeFixture, unittest.TestCase):
+    def test_the_detector_agrees_with_a_direct_probe(self):
+        real = os.path.realpath(str(self.root))
+        flipped = real.swapcase()
+        expected = os.path.exists(flipped) and os.path.samefile(real, flipped)
+        self.assertEqual(guard._case_insensitive.__wrapped__(real), expected)
 
 
 if __name__ == "__main__":
