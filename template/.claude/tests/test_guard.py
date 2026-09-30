@@ -1153,5 +1153,40 @@ class ShellWriteRoundThreeTests(TreeFixture, unittest.TestCase):
                             "git notes show", cwd=self.root / "clients/globex")
 
 
+class ShellWriteNestedAndAnsiTests(TreeFixture, unittest.TestCase):
+    """2.1.1: a substitution nested in ${...}, and ANSI-C $'...' quoting."""
+
+    def decide(self, command):
+        return guard.decide("Bash", {"command": command}, "acme", REG, self.root,
+                            self.memory, cwd=str(self.root / "clients/acme"))
+
+    def assert_denied(self, *commands):
+        for command in commands:
+            with self.subTest(command=command):
+                d = self.decide(command)
+                self.assertEqual(d.action, "deny", command)
+                self.assertIn("'globex'", d.reason)
+
+    def assert_allowed(self, *commands):
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(self.decide(command).action, "allow", command)
+
+    def test_a_substitution_inside_a_parameter_expansion_is_read(self):
+        self.assert_denied("echo ${x:-$(touch ../globex/f)}", "echo ${x:-`rm ../globex/f`}",
+                           "echo ${a:-${b:-$(touch ../globex/f)}}",
+                           "echo ${x:-$(echo '}' > ../globex/f)}",
+                           "echo ${x:-$(touch ../globex/f)}; ls")
+
+    def test_a_parameter_expansion_that_only_reads_is_allowed(self):
+        self.assert_allowed("echo ${x:-default} > notes.md", "echo ${x:-$(cat ../globex/f)}",
+                            "echo ${x:-'$(touch ../globex/f)'}")
+
+    def test_ansi_c_quotes_close_where_the_shell_closes_them(self):
+        self.assert_denied("echo $'it\\'s'; touch ../globex/f", "echo $'a\\nb' > ../globex/f",
+                           "echo $'it\\'s'\ntouch ../globex/f")
+        self.assert_allowed("echo $'x' > notes.md", "echo $'> ../globex/f'")
+
+
 if __name__ == "__main__":
     unittest.main()

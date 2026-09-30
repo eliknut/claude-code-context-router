@@ -253,7 +253,7 @@ step 4 without your yes:
 
 1. Ask which folder becomes the project root, unless you already said. Never the home directory.
 2. Clone the release into a temporary directory, not into the root:
-   `git clone --depth 1 --branch v2.1.0 https://github.com/eliknut/claude-code-context-router "$(mktemp -d)/kit"`
+   `git clone --depth 1 --branch v2.1.1 https://github.com/eliknut/claude-code-context-router "$(mktemp -d)/kit"`
 3. Show the plan, writing nothing: `<clone>/install.sh --root <root>`
 4. Wait for a yes. On a yes, run it again with `--apply` (plus `--statusline` if you want the
    status line, the only thing written outside the root).

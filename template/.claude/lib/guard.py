@@ -760,6 +760,14 @@ def _sw_split_segments(command: str) -> list[str]:
             current += ch
             i += 1
             continue
+        if command.startswith("$'", i):
+            # ANSI-C quoting: a backslash escapes the next character, so $'it\'s' is one
+            # closed string and opens nothing.
+            close = _sw_ansi_close(command, i + 2)
+            close = len(command) - 1 if close < 0 else close
+            current += command[i:close + 1]
+            i = close + 1
+            continue
         if command.startswith("${", i):
             braces += 1
             current += "${"
@@ -797,6 +805,87 @@ def _sw_split_segments(command: str) -> list[str]:
         i += 1
     segments.append(current)
     return [s.strip() for s in segments if s.strip()]
+
+
+def _sw_ansi_close(text: str, start: int) -> int:
+    """Index of the ' closing a $'...' string whose body starts at `start`, or -1."""
+    i = start
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == "'":
+            return i
+        i += 1
+    return -1
+
+
+def _sw_brace_close(text: str, start: int) -> int:
+    """Index of the } closing the ${ whose body starts at `start`, or len(text) - 1.
+
+    Nesting-aware: a ${ inside opens another level, and a $( ) or backtick inside is
+    skipped whole, so neither can close the expansion early. Quotes inside are skipped.
+    """
+    depth = 1
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if text.startswith("$'", i):
+            close = _sw_ansi_close(text, i + 2)
+            i = len(text) if close < 0 else close + 1
+            continue
+        if ch in "'\"":
+            close = text.find(ch, i + 1)
+            i = len(text) if close < 0 else close + 1
+            continue
+        if text.startswith("$(", i):
+            i = _closing(text, i + 2) + 1
+            continue
+        if ch == "`":
+            close = text.find("`", i + 1)
+            i = len(text) if close < 0 else close + 1
+            continue
+        if text.startswith("${", i):
+            depth += 1
+            i += 2
+            continue
+        if ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return len(text) - 1
+
+
+def _sw_substitutions(body: str) -> list[str]:
+    """The commands of every $( ) and backtick inside a ${ } body, which the shell runs."""
+    found = []
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "'":
+            close = body.find("'", i + 1)
+            i = len(body) if close < 0 else close + 1
+            continue
+        if body.startswith("$(", i):
+            close = _closing(body, i + 2)
+            found.append(body[i + 2:close])
+            i = close + 1
+            continue
+        if ch == "`":
+            close = body.find("`", i + 1)
+            close = len(body) if close < 0 else close
+            found.append(body[i + 1:close])
+            i = close + 1
+            continue
+        i += 1
+    return found
 
 
 def _closing(text: str, start: int) -> int:
@@ -889,9 +978,17 @@ def _shell_words(text: str):
             add(buf, True)
             i = j + 1
             continue
+        if text.startswith("$'", i):
+            close = _sw_ansi_close(text, i + 2)
+            if close < 0:
+                return None
+            add(text[i + 2:close], True)
+            i = close + 1
+            continue
         if text.startswith("${", i):
-            close = text.find("}", i + 2)
-            close = n - 1 if close < 0 else close
+            close = _sw_brace_close(text, i + 2)
+            body = text[i + 2:close]
+            words.extend(("sub", inner, False) for inner in _sw_substitutions(body))
             add(text[i:close + 1])
             i = close + 1
             continue

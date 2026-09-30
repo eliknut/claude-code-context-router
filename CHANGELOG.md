@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.1.1
+
+- The shell-write check reads a `$( )` or backtick nested inside a `${...}` expansion, so
+  `echo ${x:-$(touch <other>/f)}` is denied. A substitution there that only reads is allowed.
+- ANSI-C quoting (`$'...'`, where a backslash escapes the next character) is read as one quoted
+  string, so `echo $'it\'s'` no longer opens a quote that hides the commands after it.
+- The cloud check is unchanged; `tests/test_cloud_frozen.py` still pins it to 2.0.1.
+
 ## 2.1.0
 
 - The guard's write check now covers `Bash` too (the shell-write check). A command that writes
