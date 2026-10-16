@@ -14,6 +14,8 @@ import shlex
 import sys
 from pathlib import Path
 
+import worktree  # noqa: E402  (lib/ is on sys.path for every caller)
+
 # action is one of: allow, deny, ask, update.
 # reason is shown to Claude for deny and ask, and to the user for update.
 # updated_input is the partial tool_input to merge, for update only.
@@ -131,7 +133,9 @@ def owner_of(target: str, reg: dict, root: Path, memory_root: Path, iac_root: st
     "clients/acme" are both homes, and a file under the latter belongs to the
     latter. When `iac_root` is set, a context's IaC folders count as claims too, so
     a context's own environment folder inside a shared infrastructure repo belongs
-    to that context and not to whichever context owns the repo.
+    to that context and not to whichever context owns the repo. A path inside a linked
+    worktree outside the root, of a repo under the root, is first moved to the same
+    path in that repo's main checkout.
     """
     real = Path(os.path.realpath(target))
 
@@ -156,6 +160,23 @@ def owner_of(target: str, reg: dict, root: Path, memory_root: Path, iac_root: st
     root_real = Path(os.path.realpath(str(root)))
     fold = _case_insensitive(str(root_real))
     base = [_fold(p, fold) for p in root_real.parts]
+    # A path in a linked worktree outside the root (worktree mode, for example an Orca
+    # worktree under ~/orca/workspaces) is read as the same path in its main checkout
+    # when that checkout is under the root, so the worktree belongs to whoever owns the
+    # repo. A worktree inside the root keeps its own location. A failed lookup maps nothing.
+    # Only a path outside the root is looked up: a .git file in an ancestor of the root
+    # must never move a path that is already inside it.
+    hit = None
+    if [_fold(p, fold) for p in real.parts][:len(base)] != base:
+        try:
+            hit = worktree.linked(real)
+        except OSError:
+            hit = None
+    if hit is not None:
+        top, main = hit
+        if ([_fold(p, fold) for p in top.parts][:len(base)] != base
+                and [_fold(p, fold) for p in main.parts][:len(base)] == base):
+            real = main / real.relative_to(top)
     real_parts = [_fold(p, fold) for p in real.parts]
     if real_parts[:len(base)] != base:
         return ""

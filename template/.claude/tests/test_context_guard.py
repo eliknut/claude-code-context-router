@@ -180,12 +180,18 @@ class ScriptTests(unittest.TestCase):
         (self.home / ".claude" / "ctx-state").mkdir(parents=True)
         (self.root / "CONTEXTS.md").write_text(REGISTRY, encoding="utf-8")
         (self.home / ".claude" / "ctx-state" / "sess").write_text("acme", encoding="utf-8")
+        # The hook finds its root from its own location (rootpath.root), so it runs from
+        # a copy installed in the temp root, as in real use.
+        for part in ("hooks", "lib"):
+            shutil.copytree(HOOK.parents[1] / part, self.root / ".claude" / part,
+                            ignore=shutil.ignore_patterns("__pycache__"))
+        self.hook = self.root / ".claude" / "hooks" / HOOK.name
 
     def run_hook(self, payload):
         env = dict(os.environ)
         env["HOME"] = str(self.home)
         env["CLAUDE_PROJECT_DIR"] = str(self.root)
-        proc = subprocess.run([sys.executable, str(HOOK)],
+        proc = subprocess.run([sys.executable, str(self.hook)],
                               input=payload, env=env, capture_output=True, text=True, timeout=30)
         return proc
 
@@ -242,11 +248,11 @@ class ScriptTests(unittest.TestCase):
         drift, no memory path is ever recognised as memory: the check allows instead of
         denying, silently, with no error, and another context's memory stops being protected. Hence the real
         function here rather than a path spelled out by hand, computed under the same HOME
-        and CLAUDE_PROJECT_DIR the hook process gets.
+        and root the hook process gets.
         """
         with mock.patch.dict(os.environ, {"HOME": str(self.home),
                                           "CLAUDE_PROJECT_DIR": str(self.root)}):
-            memory = rootpath.memory_dir()
+            memory = rootpath.memory_dir(self.root.resolve())
         target = memory / "contexts" / "globex" / "tenant-notes.md"
         target.parent.mkdir(parents=True, exist_ok=True)
         proc = self.run_hook(json.dumps({

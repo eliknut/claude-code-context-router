@@ -6,6 +6,8 @@ from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gitfixture  # noqa: E402
 import guard  # noqa: E402
 
 ACME = "acme (Azure, acme.example.com), acme-labs (Azure, acme-labs.example.com)"
@@ -1187,6 +1189,98 @@ class ShellWriteNestedAndAnsiTests(TreeFixture, unittest.TestCase):
                            "echo $'it\\'s'\ntouch ../globex/f")
         self.assert_allowed("echo $'x' > notes.md", "echo $'> ../globex/f'")
 
+
+@unittest.skipUnless(gitfixture.HAVE_GIT, "git not installed")
+class WorktreeOwnerTests(TreeFixture, unittest.TestCase):
+    """A worktree-mode worktree lives outside the root; it belongs to whoever owns its repo."""
+
+    def setUp(self):
+        super().setUp()
+        self.outside = Path(self.tmp.name) / "my workspaces"
+        self.main = gitfixture.make_repo(self.root / "clients" / "globex")
+        self.wt = gitfixture.add_worktree(self.main, self.outside / "globex" / "router test",
+                                          "dev/router-test")
+
+    def test_a_file_in_a_worktree_of_a_context_home_is_owned_by_that_context(self):
+        target = str(self.wt / "docs" / "new.md")
+        self.assertEqual(guard.owner_of(target, REG, self.root, self.memory), "globex")
+
+    def test_a_write_into_another_contexts_worktree_is_denied(self):
+        d = guard.decide("Write", {"file_path": str(self.wt / "x.md")}, "acme",
+                         REG, self.root, self.memory)
+        self.assertEqual(d.action, "deny")
+        self.assertIn("globex", d.reason)
+
+    def test_a_write_into_the_active_contexts_worktree_is_allowed(self):
+        d = guard.decide("Write", {"file_path": str(self.wt / "x.md")}, "globex",
+                         REG, self.root, self.memory)
+        self.assertEqual(d.action, "allow")
+
+    def test_a_shell_write_inside_another_contexts_worktree_is_denied(self):
+        d = guard.decide("Bash", {"command": "echo hi > notes.md"}, "acme",
+                         REG, self.root, self.memory, cwd=str(self.wt))
+        self.assertEqual(d.action, "deny")
+
+    def test_a_relative_gitdir_worktree_is_mapped_too(self):
+        wt = gitfixture.add_worktree(self.main, self.outside / "globex" / "rel", "dev/rel",
+                                     relative=True)
+        self.assertEqual(guard.owner_of(str(wt / "a.md"), REG, self.root, self.memory), "globex")
+
+    def test_a_worktree_of_a_repo_outside_the_root_is_owned_by_nobody(self):
+        other = gitfixture.make_repo(Path(self.tmp.name) / "elsewhere" / "repo")
+        wt = gitfixture.add_worktree(other, self.outside / "other" / "rt", "dev/o")
+        self.assertEqual(guard.owner_of(str(wt / "a.md"), REG, self.root, self.memory), "")
+
+    def test_a_worktree_inside_a_context_home_keeps_that_homes_owner(self):
+        wt = gitfixture.add_worktree(self.main, self.root / "clients" / "initech" / "wt",
+                                     "dev/in-root")
+        self.assertEqual(guard.owner_of(str(wt / "a.md"), REG, self.root, self.memory), "initech")
+
+    def test_a_write_through_an_outside_symlink_into_another_contexts_worktree_is_denied(self):
+        link = Path(self.tmp.name) / "shortcut"
+        link.symlink_to(self.wt)
+        d = guard.decide("Write", {"file_path": str(link / "x.md")}, "acme",
+                         REG, self.root, self.memory)
+        self.assertEqual(d.action, "deny")
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores modes")
+    def test_an_unsearchable_folder_does_not_drop_a_later_denied_target(self):
+        locked = Path(self.tmp.name) / "locked"
+        locked.mkdir()
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o755)
+        cmd = "echo a > %s/x; echo b > clients/globex/f" % locked
+        d = guard.decide("Bash", {"command": cmd}, "acme", REG, self.root, self.memory,
+                         cwd=str(self.root))
+        self.assertEqual(d.action, "deny")
+
+
+    def test_an_ancestor_git_file_does_not_remap_paths_inside_the_root(self):
+        """A .git file above the root, aimed at a gitdir inside one context's repo, must
+        not move every in-root path into that repo."""
+        acme = gitfixture.make_repo(self.root / "clients" / "acme")
+        fake = acme / ".git" / "worktrees" / "fake"
+        fake.mkdir(parents=True)
+        (fake / "commondir").write_text("../..\n", encoding="utf-8")
+        (fake / "gitdir").write_text(str(Path(self.tmp.name) / ".git") + "\n", encoding="utf-8")
+        (Path(self.tmp.name) / ".git").write_text(f"gitdir: {fake}\n", encoding="utf-8")
+        guard.worktree._locate.cache_clear()
+        self.addCleanup(guard.worktree._locate.cache_clear)
+        target = str(self.root / "clients" / "initech" / "HANDOFF.md")
+        self.assertEqual(guard.owner_of(target, REG, self.root, self.memory), "initech")
+        d = guard.decide("Write", {"file_path": target}, "acme", REG, self.root, self.memory)
+        self.assertEqual(d.action, "deny")
+
+    def test_a_case_variant_of_another_contexts_worktree_is_denied(self):
+        probe = Path(self.tmp.name) / "CaseProbe"
+        probe.mkdir()
+        if not (Path(self.tmp.name) / "caseprobe").exists():
+            self.skipTest("case-sensitive filesystem")
+        variant = Path(str(self.wt).replace("my workspaces/globex/router test",
+                                            "MY Workspaces/Globex/Router Test"))
+        d = guard.decide("Write", {"file_path": str(variant / "a.md")}, "acme",
+                         REG, self.root, self.memory)
+        self.assertEqual(d.action, "deny")
 
 if __name__ == "__main__":
     unittest.main()
