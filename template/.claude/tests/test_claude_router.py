@@ -41,26 +41,27 @@ class ClaudeRouterTests(unittest.TestCase):
         stub.chmod(0o755)
         self.log = self.tmp / "stub.log"
         self.router = self.router_flags(self.root)
+        # The shipped script has no root override: every test sources a copy installed
+        # at <root>/.claude/scripts, so the root is derived exactly as in real use.
+        self.script = self.install_script(self.root)
 
     @staticmethod
     def router_flags(root):
         return ["--add-dir", str(root), "--settings", str(root / ".claude" / "orca-settings.json")]
 
-    def env(self, path=None, extra_env=None, override_root=True):
+    def env(self, path=None, extra_env=None):
         env = {k: v for k, v in os.environ.items()
-               if k not in ("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "CLAUDE_ROUTER_ROOT")}
+               if k != "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"}
         git_dir = os.path.dirname(shutil.which("git"))
         env.update(PATH=path or f"{self.bin}:{git_dir}:/usr/bin:/bin", HOME=str(self.tmp),
                    STUB_LOG=str(self.log),
                    GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
-        if override_root:
-            env["CLAUDE_ROUTER_ROOT"] = str(self.root)
         env.update(extra_env or {})
         return env
 
-    def run_claude(self, cwd, *args, path=None, extra_env=None, script=SCRIPT, override_root=True):
-        proc = subprocess.run([ZSH, "-f", "-c", RUN, "zsh", str(script), str(cwd), *args],
-                              env=self.env(path, extra_env, override_root),
+    def run_claude(self, cwd, *args, path=None, extra_env=None, script=None, run=RUN):
+        proc = subprocess.run([ZSH, "-f", "-c", run, "zsh", str(script or self.script), str(cwd), *args],
+                              env=self.env(path, extra_env),
                               capture_output=True, text=True, timeout=30)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         lines = self.log.read_text(encoding="utf-8").splitlines()
@@ -124,7 +125,7 @@ class ClaudeRouterTests(unittest.TestCase):
         self.assertEqual(argv, self.router + ["--resume", "abc-123"])
 
     def assert_refused(self, flag, *args):
-        proc = subprocess.run([ZSH, "-f", "-c", RUN, "zsh", str(SCRIPT), str(self.wt), *args],
+        proc = subprocess.run([ZSH, "-f", "-c", RUN, "zsh", str(self.script), str(self.wt), *args],
                               env=self.env(), capture_output=True, text=True, timeout=30)
         self.assertEqual(proc.returncode, 2)
         self.assertEqual(proc.stderr.splitlines(), [
@@ -175,7 +176,7 @@ class ClaudeRouterTests(unittest.TestCase):
         out = self.tmp / "out.md"
         proc = subprocess.run([ZSH, "-f", "-c",
                                'source "$1"; cd "$2"; echo hi | claude -p q > "$3"; echo marker',
-                               "zsh", str(SCRIPT), str(plain), str(out)],
+                               "zsh", str(self.script), str(plain), str(out)],
                               env=self.env(), capture_output=True, text=True, timeout=30)
         self.assertIn("marker", proc.stdout)
         self.assertNotIn("marker", out.read_text(encoding="utf-8") if out.exists() else "")
@@ -205,8 +206,8 @@ class ClaudeRouterTests(unittest.TestCase):
         self.assertEqual(argv, self.router + ["--permission-mode", "plan", "--permission-mode=acceptEdits"])
         self.assertEqual(err, "")
 
-    # Root derivation: without CLAUDE_ROUTER_ROOT the root is three folders up from the
-    # sourced script, <root>/.claude/scripts/claude-router.zsh.
+    # Root derivation: the root is three folders up from the sourced script,
+    # <root>/.claude/scripts/claude-router.zsh.
 
     def install_script(self, root):
         dest = root / ".claude" / "scripts" / "claude-router.zsh"
@@ -216,7 +217,7 @@ class ClaudeRouterTests(unittest.TestCase):
 
     def test_the_root_is_derived_from_the_script_location(self):
         script = self.install_script(self.root)
-        argv, envval, _ = self.run_claude(self.wt, "-p", "hi", script=script, override_root=False)
+        argv, envval, _ = self.run_claude(self.wt, "-p", "hi", script=script)
         self.assertEqual(argv, self.router + ["-p", "hi"])
         self.assertEqual(envval, "1")
 
@@ -225,20 +226,33 @@ class ClaudeRouterTests(unittest.TestCase):
         link = self.tmp / "dotfiles" / "claude-router.zsh"
         link.parent.mkdir()
         link.symlink_to(script)
-        argv, _, _ = self.run_claude(self.wt, script=link, override_root=False)
+        argv, _, _ = self.run_claude(self.wt, script=link)
         self.assertEqual(argv, self.router)
 
     def test_a_derived_root_that_does_not_hold_the_repo_runs_plain_claude(self):
         other_root = self.tmp / "other-root"
         script = self.install_script(other_root)
-        argv, envval, _ = self.run_claude(self.wt, "-p", "hi", script=script, override_root=False)
+        argv, envval, _ = self.run_claude(self.wt, "-p", "hi", script=script)
         self.assertEqual(argv, ["-p", "hi"])
         self.assertEqual(envval, "unset")
 
-    def test_the_override_wins_over_the_derived_root(self):
-        script = self.install_script(self.tmp / "other-root")
-        argv, _, _ = self.run_claude(self.wt, script=script)
+    def test_the_shipped_script_has_no_root_override(self):
+        self.assertNotIn("CLAUDE_ROUTER_ROOT", SCRIPT.read_text(encoding="utf-8").replace(
+            "_CLAUDE_ROUTER_ROOT", ""))
+
+    def test_an_earlier_alias_does_not_survive_sourcing(self):
+        run = 'alias claude="claude --dangerously-skip-permissions"; ' + RUN
+        argv, envval, err = self.run_claude(self.wt, "-p", "hi", run=run)
+        self.assertEqual(argv, self.router + ["-p", "hi"])
+        self.assertEqual(envval, "1")
+        self.assertEqual(err, "")
+
+    def test_a_ceiling_at_the_worktree_top_does_not_hide_router_mode(self):
+        sub = self.wt / "src"
+        sub.mkdir()
+        argv, envval, _ = self.run_claude(sub, extra_env={"GIT_CEILING_DIRECTORIES": str(self.wt)})
         self.assertEqual(argv, self.router)
+        self.assertEqual(envval, "1")
 
 
 if __name__ == "__main__":

@@ -197,7 +197,8 @@ whose own folder is outside the root, of a repo that lives under the root.
   `worktree of <repo> -> context <name>`; on a fresh session it also writes the marker.
 - The guard treats a path in such a worktree as the same path in the main checkout.
 
-Enable it by adding one line to `~/.zshrc` (the installer prints it and never edits the file):
+Enable it by adding one line to `~/.zshrc` (the installer prints it and never edits the file).
+zsh only: source the file from `~/.zshrc`; do not eval it, copy it, or source it from bash.
 
 ```
 source <root>/.claude/scripts/claude-router.zsh

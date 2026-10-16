@@ -95,11 +95,16 @@ def worktree_context(cwd: str, reg: dict | None, root: Path) -> tuple[str, str]:
     if not cwd or reg is None:
         return "", ""
     try:
+        real_root = Path(root).resolve()
+        real_cwd = Path(cwd).resolve()
+        # A cwd inside the root is never a worktree session, whatever .git file sits
+        # above the root.
+        if real_cwd == real_root or real_root in real_cwd.parents:
+            return "", ""
         hit = worktree.linked(cwd)
         if hit is None:
             return "", ""
         top, main = hit
-        real_root = Path(root).resolve()
         if top == real_root or real_root in top.parents:
             return "", ""
         name = guard.owner_of(str(main), reg, root, rootpath.memory_dir(root))

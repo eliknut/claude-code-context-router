@@ -279,6 +279,7 @@ rel=".claude/orca-settings.json"; dest="$ROOT/$rel"
 rendered="$(mktemp "${TMPDIR:-/tmp}/kit-orca-settings.XXXXXX")"
 python3 "$TEMPLATE/.claude/scripts/orca_settings.py" "$TEMPLATE/.claude/orca-settings.json.tmpl" "$ROOT" > "$rendered" \
   || { rm -f "$rendered"; die "could not render $rel"; }
+chmod 644 "$rendered"
 if [ ! -f "$dest" ]; then
   line NEW "$rel"; changes=$((changes+1))
   [ "$APPLY" = 1 ] && place "$rendered" "$dest"

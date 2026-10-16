@@ -29,23 +29,41 @@ class RootPathTests(unittest.TestCase):
         if self.saved is not None:
             os.environ["CLAUDE_PROJECT_DIR"] = self.saved
 
-    def test_root_prefers_the_env_var_when_it_holds_the_registry(self):
-        (self.tmp / "CONTEXTS.md").write_text("# Contexts\n", encoding="utf-8")
-        os.environ["CLAUDE_PROJECT_DIR"] = str(self.tmp)
-        self.assertEqual(rootpath.root(), self.tmp.resolve())
+    def test_root_prefers_the_env_var_when_its_own_root_has_no_registry(self):
+        own = self.tmp / "own"
+        mod = load_isolated(own)
+        other = self.tmp / "other"
+        other.mkdir()
+        (other / "CONTEXTS.md").write_text("# Contexts\n", encoding="utf-8")
+        os.environ["CLAUDE_PROJECT_DIR"] = str(other)
+        self.assertEqual(mod.root(), other.resolve())
+
+    def test_a_registry_in_the_env_var_folder_does_not_win_over_the_own_root(self):
+        """A worktree-mode session: the project dir is the worktree, and a CONTEXTS.md
+        tracked in that repo must not replace the router's registry."""
+        own = self.tmp / "own"
+        mod = load_isolated(own)
+        (own / "CONTEXTS.md").write_text("# Contexts\n", encoding="utf-8")
+        planted = self.tmp / "workspaces" / "acme-wt"
+        planted.mkdir(parents=True)
+        (planted / "CONTEXTS.md").write_text("# Contexts\n", encoding="utf-8")
+        os.environ["CLAUDE_PROJECT_DIR"] = str(planted)
+        self.assertEqual(mod.root(), own.resolve())
 
     def test_root_ignores_an_env_var_without_the_registry(self):
-        """A worktree-mode session: the project dir is the worktree, which has no
-        CONTEXTS.md, so the root must stay where this file lives."""
+        own = self.tmp / "own"
+        mod = load_isolated(own)
         worktree = self.tmp / "workspaces" / "router test"
         worktree.mkdir(parents=True)
         os.environ["CLAUDE_PROJECT_DIR"] = str(worktree)
-        self.assertEqual(rootpath.root(), Path(rootpath.__file__).resolve().parents[2])
+        self.assertEqual(mod.root(), own.resolve())
 
     def test_root_ignores_a_registry_that_is_a_folder(self):
+        own = self.tmp / "own"
+        mod = load_isolated(own)
         (self.tmp / "CONTEXTS.md").mkdir()
         os.environ["CLAUDE_PROJECT_DIR"] = str(self.tmp)
-        self.assertEqual(rootpath.root(), Path(rootpath.__file__).resolve().parents[2])
+        self.assertEqual(mod.root(), own.resolve())
 
     def test_root_falls_back_to_the_file_location(self):
         mod = load_isolated(self.tmp)

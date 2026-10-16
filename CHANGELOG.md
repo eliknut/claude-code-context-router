@@ -21,6 +21,15 @@
   holds `CONTEXTS.md`.
 - `CLAUDE.md`: worktree sessions in section 1, the worktree in `Repo state`, and worktrees are
   not a wrong directory. Copy these into your own `CLAUDE.md`.
+- Trust boundaries in worktree mode: `rootpath.root()` takes the root from its own location
+  whenever that holds `CONTEXTS.md` and uses `CLAUDE_PROJECT_DIR` only as the fallback, so a
+  `CONTEXTS.md` tracked in a worktree's repo cannot replace the registry. The guard maps only
+  paths outside the root, so a `.git` file above the root cannot move paths inside it. A worktree
+  counts only when git's own back pointer (`<gitdir>/gitdir`) names it, and a session started
+  inside the root is never a worktree session.
+- The wrapper removes an earlier `claude` alias when sourced, has no root override, and ignores
+  `GIT_CEILING_DIRECTORIES` when it looks for the worktree. Hook tests run from a copy installed
+  in a temp root. The rendered `orca-settings.json` is mode 644.
 - The cloud check is unchanged; `tests/test_cloud_frozen.py` still pins it to 2.0.1.
 
 ## 2.1.1

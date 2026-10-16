@@ -1255,5 +1255,21 @@ class WorktreeOwnerTests(TreeFixture, unittest.TestCase):
         self.assertEqual(d.action, "deny")
 
 
+    def test_an_ancestor_git_file_does_not_remap_paths_inside_the_root(self):
+        """A .git file above the root, aimed at a gitdir inside one context's repo, must
+        not move every in-root path into that repo."""
+        acme = gitfixture.make_repo(self.root / "clients" / "acme")
+        fake = acme / ".git" / "worktrees" / "fake"
+        fake.mkdir(parents=True)
+        (fake / "commondir").write_text("../..\n", encoding="utf-8")
+        (fake / "gitdir").write_text(str(Path(self.tmp.name) / ".git") + "\n", encoding="utf-8")
+        (Path(self.tmp.name) / ".git").write_text(f"gitdir: {fake}\n", encoding="utf-8")
+        guard.worktree._locate.cache_clear()
+        self.addCleanup(guard.worktree._locate.cache_clear)
+        target = str(self.root / "clients" / "initech" / "HANDOFF.md")
+        self.assertEqual(guard.owner_of(target, REG, self.root, self.memory), "initech")
+        d = guard.decide("Write", {"file_path": target}, "acme", REG, self.root, self.memory)
+        self.assertEqual(d.action, "deny")
+
 if __name__ == "__main__":
     unittest.main()

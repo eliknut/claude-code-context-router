@@ -4,19 +4,23 @@
 # with the router: the root's CLAUDE.md, its four hooks, its memory. Everywhere else it is
 # plain `command claude`.
 # The root is where this file lives (<root>/.claude/scripts/claude-router.zsh), captured
-# once at source time. CLAUDE_ROUTER_ROOT overrides it, for tests only.
+# once at source time. zsh only: source it, do not eval or copy it.
 typeset -g _CLAUDE_ROUTER_ROOT=${${(%):-%x}:A:h:h:h}
 
-claude() {
+# An alias named claude would make a `claude()` definition fail and then run in its
+# place, bypass flags kept; drop it and use the keyword form.
+unalias claude 2>/dev/null
+
+function claude {
   emulate -L zsh
-  local root=${CLAUDE_ROUTER_ROOT:-$_CLAUDE_ROUTER_ROOT}
+  local root=$_CLAUDE_ROUTER_ROOT
   if [[ -z $root ]]; then
     command claude "$@"
     return
   fi
   root=${root:A}
   local raw
-  raw=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR; command git -c core.fsmonitor=false rev-parse --path-format=absolute --show-toplevel --git-common-dir 2>/dev/null)
+  raw=$(unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_CEILING_DIRECTORIES; command git -c core.fsmonitor=false rev-parse --path-format=absolute --show-toplevel --git-common-dir 2>/dev/null)
   local -a out
   out=("${(@f)raw}")
   if (( ${#out} != 2 )) || [[ -z ${out[1]} || -z ${out[2]} ]]; then

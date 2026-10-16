@@ -14,23 +14,22 @@ from pathlib import Path
 def root() -> Path:
     """The project root.
 
-    Claude Code exports CLAUDE_PROJECT_DIR into every hook process, so that wins.
-    It is NOT set for an ordinary tool invocation (a normal Bash call Claude runs
-    itself): there it is simply absent, not empty, which is exactly why the
-    file-location fallback below exists. Without it, this file is at
-    <root>/.claude/lib/rootpath.py, which makes the third parent the root by
-    construction.
-
-    The env var only counts when it holds CONTEXTS.md. In a session started in a
-    linked worktree (worktree mode, for example an Orca worktree) it names the worktree,
-    which has no registry, and the router still lives where this file does.
+    This file is at <root>/.claude/lib/rootpath.py, which makes the third parent the
+    root by construction, and that wins whenever it holds CONTEXTS.md. Claude Code's
+    CLAUDE_PROJECT_DIR is only the fallback (a root whose registry is missing): in a
+    session started in a linked worktree (worktree mode, for example an Orca worktree)
+    it names the worktree, and a CONTEXTS.md tracked in that repo must not replace the
+    router's own registry. The env var also needs CONTEXTS.md to count.
     """
+    own = Path(__file__).resolve().parents[2]
+    if (own / "CONTEXTS.md").is_file():
+        return own
     env = os.environ.get("CLAUDE_PROJECT_DIR")
     if env:
         candidate = Path(env).expanduser().resolve()
         if (candidate / "CONTEXTS.md").is_file():
             return candidate
-    return Path(__file__).resolve().parents[2]
+    return own
 
 
 def memory_dir(base: Path | None = None) -> Path:

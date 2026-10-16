@@ -164,10 +164,14 @@ def owner_of(target: str, reg: dict, root: Path, memory_root: Path, iac_root: st
     # worktree under ~/orca/workspaces) is read as the same path in its main checkout
     # when that checkout is under the root, so the worktree belongs to whoever owns the
     # repo. A worktree inside the root keeps its own location. A failed lookup maps nothing.
-    try:
-        hit = worktree.linked(real)
-    except OSError:
-        hit = None
+    # Only a path outside the root is looked up: a .git file in an ancestor of the root
+    # must never move a path that is already inside it.
+    hit = None
+    if [_fold(p, fold) for p in real.parts][:len(base)] != base:
+        try:
+            hit = worktree.linked(real)
+        except OSError:
+            hit = None
     if hit is not None:
         top, main = hit
         if ([_fold(p, fold) for p in top.parts][:len(base)] != base

@@ -55,6 +55,12 @@ def _locate(directory: str) -> tuple[str, str] | None:
         common = _resolve_from(gitdir, common_raw)
         if common.name != ".git":
             return None
+        # git writes <gitdir>/gitdir pointing back at <top>/.git for every linked
+        # worktree. A .git file whose gitdir does not point back is a forgery (or a
+        # pruned worktree) and counts as no worktree.
+        back_raw = _read_line(gitdir / "gitdir")
+        if not back_raw or _resolve_from(gitdir, back_raw) != Path(os.path.realpath(str(dotgit))):
+            return None
         return str(folder), str(common.parent)
     return None
 

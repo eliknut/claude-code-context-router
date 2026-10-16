@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-HOOK = HERE.parent / "hooks" / "session_start.py"
+KIT = HERE.parent
 sys.path.insert(0, str(HERE))
 import gitfixture  # noqa: E402
 
@@ -44,6 +44,12 @@ class SessionStartWorktreeTests(unittest.TestCase):
         self.root.mkdir()
         self.home.mkdir()
         (self.root / "CONTEXTS.md").write_text(REGISTRY, encoding="utf-8")
+        # The hook finds its root from its own location, so it runs from a copy
+        # installed in the temp root, as in real use.
+        for part in ("hooks", "lib"):
+            shutil.copytree(KIT / part, self.root / ".claude" / part,
+                            ignore=shutil.ignore_patterns("__pycache__"))
+        self.hook = self.root / ".claude" / "hooks" / "session_start.py"
         self.main = gitfixture.make_repo(self.root / "repos" / "acme")
         self.wt = gitfixture.add_worktree(self.main, self.tmp / "my workspaces" / "acme" / "rt",
                                           "dev/rt")
@@ -52,7 +58,7 @@ class SessionStartWorktreeTests(unittest.TestCase):
     def run_hook(self, cwd, source="startup", sid="s1"):
         env = dict(os.environ, HOME=str(self.home), CLAUDE_PROJECT_DIR=str(self.root))
         payload = json.dumps({"session_id": sid, "source": source, "cwd": str(cwd)})
-        proc = subprocess.run([sys.executable, str(HOOK)], input=payload, env=env,
+        proc = subprocess.run([sys.executable, str(self.hook)], input=payload, env=env,
                               capture_output=True, text=True, timeout=30)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         return proc.stdout
@@ -133,6 +139,24 @@ class SessionStartWorktreeTests(unittest.TestCase):
         self.assertNotIn("worktree of", out)
         self.assertFalse(self.marker.exists())
 
+
+    def test_an_ancestor_git_file_does_not_hand_the_root_a_context(self):
+        """A .git file above the root, aimed at a gitdir in a context's repo, must not
+        turn a session in the root itself into a worktree session."""
+        gitdir = self.main / ".git" / "worktrees" / "rt"
+        (self.tmp / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+        out = self.run_hook(self.root)
+        self.assertNotIn("worktree of", out)
+        self.assertFalse(self.marker.exists())
+
+    def test_a_forged_git_file_outside_the_root_writes_no_marker(self):
+        forged = self.tmp / "forged"
+        forged.mkdir()
+        gitdir = self.main / ".git" / "worktrees" / "rt"
+        (forged / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+        out = self.run_hook(forged)
+        self.assertNotIn("worktree of", out)
+        self.assertFalse(self.marker.exists())
 
 if __name__ == "__main__":
     unittest.main()

@@ -82,5 +82,22 @@ class WorktreeTests(unittest.TestCase):
         self.assertEqual(worktree.to_main_path(link / "x.md"), self.main / "x.md")
 
 
+    def test_a_forged_git_file_pointing_into_a_real_repo_is_not_a_worktree(self):
+        """git's own <gitdir>/gitdir points back at the real worktree, not at the forgery."""
+        forged = self.tmp / "forged"
+        forged.mkdir()
+        gitdir = self.main / ".git" / "worktrees" / "rt"
+        (forged / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+        self.assertIsNone(worktree.main_checkout(forged / "x"))
+
+    def test_a_gitdir_without_a_back_pointer_is_not_a_worktree(self):
+        fake = self.main / ".git" / "worktrees" / "fake"
+        fake.mkdir(parents=True)
+        (fake / "commondir").write_text("../..\n", encoding="utf-8")
+        forged = self.tmp / "forged2"
+        forged.mkdir()
+        (forged / ".git").write_text(f"gitdir: {fake}\n", encoding="utf-8")
+        self.assertIsNone(worktree.main_checkout(forged / "x"))
+
 if __name__ == "__main__":
     unittest.main()

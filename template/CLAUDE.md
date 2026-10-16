@@ -142,8 +142,9 @@ when a piece of work reaches a natural end, or before a context switch. `Now`, t
 section and `Repo state` are rewritten; `Recent` gets one new line at the top and is capped at ten.
 For `Repo state`, run `git status --short --branch` and `git worktree list` in every git repo under
 the context's home and owned folders, and list only repos that are dirty or not on their main
-branch. When the session runs in a linked worktree (worktree mode), also run `git status --short
---branch` in that worktree and list it the same way. Confirm the path in the reply. Keep the file under about 60 lines.
+branch. When the session runs in a linked worktree (worktree mode), also run
+`git status --short --branch` in that worktree and list it the same way. Confirm the path in the
+reply. Keep the file under about 60 lines.
 
 Template:
 
