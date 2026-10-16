@@ -8,7 +8,8 @@
 #   --force                                        overwrite a file you own
 #
 # Files under .claude/{hooks,lib,scripts,skills,tests} belong to the kit and are replaced
-# on every install, with a backup. CLAUDE.md, CONTEXTS.md, .claude/kit.json and
+# on every install, with a backup, and so is .claude/orca-settings.json, rendered for
+# the root (worktree mode). CLAUDE.md, CONTEXTS.md, .claude/kit.json and
 # save-phrases.txt belong to you and are only ever seeded when absent. --force replaces
 # CLAUDE.md, CONTEXTS.md and save-phrases.txt (with a backup), never kit.json. --force
 # also governs an existing statusLine entry in your home settings.json and an existing
@@ -210,8 +211,12 @@ KIT_OWNED=(
   .claude/lib/guard.py
   .claude/lib/registry.py
   .claude/lib/handoff.py
+  .claude/lib/worktree.py
   .claude/scripts/set_context.sh
   .claude/scripts/registry_check.py
+  .claude/scripts/claude-router.zsh
+  .claude/scripts/orca_settings.py
+  .claude/orca-settings.json.tmpl
   .claude/skills/new-context/SKILL.md
   .claude/skills/new-context/templates/CLAUDE.md.tmpl
   .claude/skills/new-context/templates/HANDOFF.md.tmpl
@@ -223,6 +228,11 @@ KIT_OWNED=(
   .claude/tests/test_guard.py
   .claude/tests/test_context_guard.py
   .claude/tests/test_cloud_frozen.py
+  .claude/tests/gitfixture.py
+  .claude/tests/test_worktree.py
+  .claude/tests/test_session_start.py
+  .claude/tests/test_claude_router.py
+  .claude/tests/test_orca_settings.py
   .claude/tests/fixtures/guard_2_0_1.py
   .claude/tests/fixtures/cloud_corpus.json
 )
@@ -259,6 +269,26 @@ for rel in "${KIT_OWNED[@]}"; do
   fi
 done
 [ "$APPLY" = 1 ] && chmod +x "$ROOT/.claude/scripts/set_context.sh"
+
+# Worktree mode: orca-settings.json holds absolute paths, so it is rendered for this root
+# from the kit's template rather than copied. Same rules as a kit file: replaced on every
+# install, previous copy backed up. It is inert until claude-router.zsh is sourced.
+echo
+echo "generated for this root (replaced on every install, previous copy backed up):"
+rel=".claude/orca-settings.json"; dest="$ROOT/$rel"
+rendered="$(mktemp "${TMPDIR:-/tmp}/kit-orca-settings.XXXXXX")"
+python3 "$TEMPLATE/.claude/scripts/orca_settings.py" "$TEMPLATE/.claude/orca-settings.json.tmpl" "$ROOT" > "$rendered" \
+  || { rm -f "$rendered"; die "could not render $rel"; }
+if [ ! -f "$dest" ]; then
+  line NEW "$rel"; changes=$((changes+1))
+  [ "$APPLY" = 1 ] && place "$rendered" "$dest"
+elif cmp -s "$rendered" "$dest"; then
+  line same "$rel"
+else
+  line REPLACE "$rel"; changes=$((changes+1))
+  if [ "$APPLY" = 1 ]; then keep "$rel" "$dest"; place "$rendered" "$dest"; fi
+fi
+rm -f "$rendered"
 
 echo
 echo "your files (seeded when absent, never overwritten):"
@@ -383,6 +413,10 @@ if [ "$APPLY" = 1 ]; then
     echo "  2. CONTEXTS.md already exists (yours, left alone); ask it to run the new-context skill for anything not yet registered"
   fi
   echo "  3. then: python3 \"$ROOT/.claude/scripts/registry_check.py\""
+  echo
+  echo "worktree mode (optional, for linked worktrees outside the root, such as Orca's):"
+  echo "  add this line to ~/.zshrc yourself; the installer never edits it:"
+  printf '  source %q\n' "$ROOT/.claude/scripts/claude-router.zsh"
 else
   if [ "$changes" = 0 ]; then echo "nothing to do"; else echo "$changes change(s) would be applied; re-run with --apply"; fi
 fi

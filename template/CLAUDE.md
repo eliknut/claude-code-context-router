@@ -29,6 +29,15 @@ work. Use the `context-bootstrap` skill and do nothing else first.
   the `new-context` skill. Never invent a context.
 - A later message naming a different context is a switch: update the current handoff (section 5),
   confirm the switch, activate the new context and rewrite the marker.
+- Worktree sessions (worktree mode, for example Orca): a linked git worktree whose own folder is
+  outside the project root and whose main repo is under it. A worktree inside the root is an
+  ordinary root path. When the session-start output has a line `worktree of <repo> -> context
+  <name>`, that context is resolved. Activate it (section 2) without asking; the marker is already
+  written. If the first message names a different context, that is a switch as above. In these
+  sessions the `claude` wrapper drops `--dangerously-skip-permissions`,
+  `--allow-dangerously-skip-permissions` and `--permission-mode bypassPermissions`, because the
+  router rules need permission prompts, and refuses `--settings`, `--bare` and `--safe-mode`,
+  because each would run the session without the router hooks.
 
 ## 2. Activation, in this order
 
@@ -133,7 +142,8 @@ when a piece of work reaches a natural end, or before a context switch. `Now`, t
 section and `Repo state` are rewritten; `Recent` gets one new line at the top and is capped at ten.
 For `Repo state`, run `git status --short --branch` and `git worktree list` in every git repo under
 the context's home and owned folders, and list only repos that are dirty or not on their main
-branch. Confirm the path in the reply. Keep the file under about 60 lines.
+branch. When the session runs in a linked worktree (worktree mode), also run `git status --short
+--branch` in that worktree and list it the same way. Confirm the path in the reply. Keep the file under about 60 lines.
 
 Template:
 
@@ -179,6 +189,8 @@ affected consumers before editing.
 
 If the working directory is not the project root, say so in the first line of the first reply and
 recommend restarting from the root. Still use absolute paths so nothing lands in the wrong place.
+Exception: a linked git worktree outside the root of a repo under it (worktree mode) is not a wrong
+directory; say nothing about it.
 
 <!-- optional: conventions -->
 ## 8. Conventions that apply everywhere

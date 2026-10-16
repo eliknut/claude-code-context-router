@@ -181,6 +181,43 @@ What it does **not** catch, so the rules in `CLAUDE.md` still matter:
 
 It is a safety net for the shapes an agent usually emits, not a sandbox.
 
+## Worktree mode (Orca and similar)
+
+Tools such as Orca put each git worktree in a folder of their own, for example
+`~/orca/workspaces/<repo>/<name>`, outside your project root. Claude Code started there would see
+no `CLAUDE.md`, no hooks and no memory. Worktree mode fixes that for one case: a linked worktree
+whose own folder is outside the root, of a repo that lives under the root.
+
+- A zsh function `claude` (`.claude/scripts/claude-router.zsh`) checks where it is started. In
+  that case it runs `claude --add-dir <root> --settings <root>/.claude/orca-settings.json` with
+  `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`, so the root's `CLAUDE.md`, the four hooks
+  (absolute paths) and the root's memory folder all load. Everywhere else it is plain
+  `command claude`.
+- The session-start hook picks the context from the repo that owns the worktree and prints
+  `worktree of <repo> -> context <name>`; on a fresh session it also writes the marker.
+- The guard treats a path in such a worktree as the same path in the main checkout.
+
+Enable it by adding one line to `~/.zshrc` (the installer prints it and never edits the file):
+
+```
+source <root>/.claude/scripts/claude-router.zsh
+```
+
+The root is taken from where the script lives, so nothing in it is hardcoded. In worktree mode the
+wrapper drops `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions` and
+`--permission-mode bypassPermissions` (one line on stderr says so), because the router's rules
+rely on permission prompts. It refuses `--settings`, `--bare` and `--safe-mode` with exit code 2,
+because each would run the session without the router's hooks; `command claude ...` skips the
+wrapper when you mean it.
+
+Known limits:
+
+- `.claude/settings.local.json` allow rules of the root are not loaded in worktree sessions, so
+  expect more permission prompts there.
+- Chat views and SSH or remote worktrees are not covered: only a `claude` started from a zsh that
+  sourced the script.
+- The guard treats every outside-root worktree of a root repo as belonging to that repo's context.
+
 ## Customising
 
 Your `CLAUDE.md` is yours after install. Section 8 is an empty slot for rules that hold in every
@@ -212,8 +249,10 @@ template/
     settings.json     hook wiring (SessionStart, UserPromptSubmit, SessionEnd, PreToolUse)
     hooks/            session_start.py, user_prompt_submit.py, session_end.py,
                       context_guard.py, save-phrases.txt
-    lib/              rootpath.py, registry.py, handoff.py, guard.py
-    scripts/          set_context.sh, registry_check.py
+    lib/              rootpath.py, registry.py, handoff.py, guard.py, worktree.py
+    scripts/          set_context.sh, registry_check.py, claude-router.zsh (worktree mode),
+                      orca_settings.py (renders orca-settings.json)
+    orca-settings.json.tmpl  worktree-mode settings, rendered as orca-settings.json
     skills/           context-bootstrap, new-context
     tests/            test suite for all of the above
 ```
@@ -233,7 +272,8 @@ git pull && ./install.sh --root ~/work && ./install.sh --root ~/work --apply
 - **Replaced** on every install, previous copy saved under `.claude/.kit-backup/<timestamp>/`
   with a restore command printed: the kit's own files in `.claude/hooks/*.py`, `.claude/lib`,
   `.claude/scripts`, `.claude/tests`, the two kit skills in `.claude/skills`, and the four kit
-  hook entries in `.claude/settings.json`.
+  hook entries in `.claude/settings.json`. `.claude/orca-settings.json` is rendered for your
+  root from `.claude/orca-settings.json.tmpl` and follows the same rule.
 - **Seeded when absent, never replaced**: `CLAUDE.md`, `CONTEXTS.md`,
   `.claude/hooks/save-phrases.txt`. `--force` replaces these three, with a backup.
 - **Never replaced, not even with `--force`**: `.claude/kit.json`.
@@ -253,7 +293,7 @@ step 4 without your yes:
 
 1. Ask which folder becomes the project root, unless you already said. Never the home directory.
 2. Clone the release into a temporary directory, not into the root:
-   `git clone --depth 1 --branch v2.1.1 https://github.com/eliknut/claude-code-context-router "$(mktemp -d)/kit"`
+   `git clone --depth 1 --branch v2.2.0 https://github.com/eliknut/claude-code-context-router "$(mktemp -d)/kit"`
 3. Show the plan, writing nothing: `<clone>/install.sh --root <root>`
 4. Wait for a yes. On a yes, run it again with `--apply` (plus `--statusline` if you want the
    status line, the only thing written outside the root).

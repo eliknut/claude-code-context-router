@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.2.0
+
+- Worktree mode: a linked git worktree whose folder is outside the root, of a repo under the root
+  (for example an Orca worktree in `~/orca/workspaces/<repo>/<name>`), gets the router. Source
+  `.claude/scripts/claude-router.zsh` from `~/.zshrc`; its `claude` function then adds
+  `--add-dir <root>` and `--settings <root>/.claude/orca-settings.json` there and is plain
+  `command claude` everywhere else. The root is derived from the script's own location.
+- In worktree mode the wrapper drops `--dangerously-skip-permissions`,
+  `--allow-dangerously-skip-permissions` and `--permission-mode bypassPermissions`, and refuses
+  `--settings`, `--bare` and `--safe-mode` (exit 2).
+- `install.sh` renders `.claude/orca-settings.json` for the root from
+  `.claude/orca-settings.json.tmpl` (absolute hook paths, the root's memory folder), with the same
+  backup and replace rules as kit files. It never edits `~/.zshrc`; after `--apply` it prints the
+  line to add.
+- `session_start.py` resolves the context from the repo that owns the worktree and prints
+  `worktree of <repo> -> context <name>`; it writes the marker only on startup or clear.
+- The guard reads a path in such a worktree as the same path in the main checkout (new
+  `lib/worktree.py`, no git process). `rootpath.root()` trusts `CLAUDE_PROJECT_DIR` only when it
+  holds `CONTEXTS.md`.
+- `CLAUDE.md`: worktree sessions in section 1, the worktree in `Repo state`, and worktrees are
+  not a wrong directory. Copy these into your own `CLAUDE.md`.
+- The cloud check is unchanged; `tests/test_cloud_frozen.py` still pins it to 2.0.1.
+
 ## 2.1.1
 
 - The shell-write check reads a `$( )` or backtick nested inside a `${...}` expansion, so

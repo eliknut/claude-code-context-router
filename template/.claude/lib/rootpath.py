@@ -20,10 +20,16 @@ def root() -> Path:
     file-location fallback below exists. Without it, this file is at
     <root>/.claude/lib/rootpath.py, which makes the third parent the root by
     construction.
+
+    The env var only counts when it holds CONTEXTS.md. In a session started in a
+    linked worktree (worktree mode, for example an Orca worktree) it names the worktree,
+    which has no registry, and the router still lives where this file does.
     """
     env = os.environ.get("CLAUDE_PROJECT_DIR")
     if env:
-        return Path(env).expanduser().resolve()
+        candidate = Path(env).expanduser().resolve()
+        if (candidate / "CONTEXTS.md").is_file():
+            return candidate
     return Path(__file__).resolve().parents[2]
 
 

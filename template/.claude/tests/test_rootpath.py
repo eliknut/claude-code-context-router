@@ -29,9 +29,23 @@ class RootPathTests(unittest.TestCase):
         if self.saved is not None:
             os.environ["CLAUDE_PROJECT_DIR"] = self.saved
 
-    def test_root_prefers_the_env_var(self):
+    def test_root_prefers_the_env_var_when_it_holds_the_registry(self):
+        (self.tmp / "CONTEXTS.md").write_text("# Contexts\n", encoding="utf-8")
         os.environ["CLAUDE_PROJECT_DIR"] = str(self.tmp)
         self.assertEqual(rootpath.root(), self.tmp.resolve())
+
+    def test_root_ignores_an_env_var_without_the_registry(self):
+        """A worktree-mode session: the project dir is the worktree, which has no
+        CONTEXTS.md, so the root must stay where this file lives."""
+        worktree = self.tmp / "workspaces" / "router test"
+        worktree.mkdir(parents=True)
+        os.environ["CLAUDE_PROJECT_DIR"] = str(worktree)
+        self.assertEqual(rootpath.root(), Path(rootpath.__file__).resolve().parents[2])
+
+    def test_root_ignores_a_registry_that_is_a_folder(self):
+        (self.tmp / "CONTEXTS.md").mkdir()
+        os.environ["CLAUDE_PROJECT_DIR"] = str(self.tmp)
+        self.assertEqual(rootpath.root(), Path(rootpath.__file__).resolve().parents[2])
 
     def test_root_falls_back_to_the_file_location(self):
         mod = load_isolated(self.tmp)
