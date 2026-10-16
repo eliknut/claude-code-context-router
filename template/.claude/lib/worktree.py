@@ -21,6 +21,14 @@ def _resolve_from(base: Path, raw: str) -> Path:
     return Path(os.path.realpath(str(candidate)))
 
 
+def _same(a: Path, b: Path) -> bool:
+    """True when both name the same existing file or folder. A missing path is no match."""
+    try:
+        return os.path.samefile(str(a), str(b))
+    except OSError:
+        return False
+
+
 def _read_line(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8").strip()
@@ -55,11 +63,16 @@ def _locate(directory: str) -> tuple[str, str] | None:
         common = _resolve_from(gitdir, common_raw)
         if common.name != ".git":
             return None
-        # git writes <gitdir>/gitdir pointing back at <top>/.git for every linked
-        # worktree. A .git file whose gitdir does not point back is a forgery (or a
-        # pruned worktree) and counts as no worktree.
+        # git keeps a linked worktree's admin folder at <common>/worktrees/<name> and
+        # writes <gitdir>/gitdir there pointing back at <top>/.git. Both must hold: a
+        # .git file that fails either is a forgery (or a pruned or moved worktree) and
+        # counts as no worktree. An admin folder outside the main repo cannot claim it.
+        # Compared with samefile, so a case variant on a case-insensitive filesystem
+        # still matches.
+        if not _same(gitdir.parent, common / "worktrees"):
+            return None
         back_raw = _read_line(gitdir / "gitdir")
-        if not back_raw or _resolve_from(gitdir, back_raw) != Path(os.path.realpath(str(dotgit))):
+        if not back_raw or not _same(_resolve_from(gitdir, back_raw), dotgit):
             return None
         return str(folder), str(common.parent)
     return None

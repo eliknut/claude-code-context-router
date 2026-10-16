@@ -218,6 +218,12 @@ Known limits:
 - Chat views and SSH or remote worktrees are not covered: only a `claude` started from a zsh that
   sourced the script.
 - The guard treats every outside-root worktree of a root repo as belonging to that repo's context.
+- A worktree moved with plain `mv` is not recognised: the guard treats it as outside every context
+  and no context is picked. Run `git worktree repair` after moving one.
+- `.claude` in the root must be a real folder, not a symlink: the root is taken from the hooks'
+  own location.
+- Source `claude-router.zsh` last in `~/.zshrc`: an alias or `claude` function defined after it
+  wins and runs plain claude.
 
 ## Customising
 

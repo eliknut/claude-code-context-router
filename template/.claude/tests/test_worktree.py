@@ -99,5 +99,32 @@ class WorktreeTests(unittest.TestCase):
         (forged / ".git").write_text(f"gitdir: {fake}\n", encoding="utf-8")
         self.assertIsNone(worktree.main_checkout(forged / "x"))
 
+    def test_an_admin_folder_outside_the_main_repo_is_not_a_worktree(self):
+        """A full forgery written outside the repo: commondir names the real repo and the
+        back pointer is right, but git never puts an admin folder outside <common>/worktrees."""
+        evil = self.tmp / "evil"
+        gd = evil / "gd"
+        gd.mkdir(parents=True)
+        (evil / ".git").write_text(f"gitdir: {gd}\n", encoding="utf-8")
+        (gd / "commondir").write_text(f"{self.main / '.git'}\n", encoding="utf-8")
+        (gd / "gitdir").write_text(f"{evil / '.git'}\n", encoding="utf-8")
+        (gd / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        self.assertIsNone(worktree.main_checkout(evil / "x"))
+
+    def test_a_worktree_created_through_a_symlinked_path_maps(self):
+        link = self.tmp / "wslink"
+        (self.tmp / "realws").mkdir()
+        os.symlink(self.tmp / "realws", link)
+        wt = gitfixture.add_worktree(self.main, link / "via-link", "dev/link")
+        self.assertEqual(worktree.main_checkout(wt / "x"), self.main)
+
+    def test_a_case_variant_of_the_worktree_path_maps(self):
+        probe = self.tmp / "CaseProbe"
+        probe.mkdir()
+        if not (self.tmp / "caseprobe").exists():
+            self.skipTest("case-sensitive filesystem")
+        variant = Path(str(self.wt).replace("/workspaces/demo/rt", "/WORKSPACES/Demo/RT"))
+        self.assertEqual(worktree.main_checkout(variant / "a.md"), self.main)
+
 if __name__ == "__main__":
     unittest.main()

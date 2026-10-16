@@ -158,5 +158,17 @@ class SessionStartWorktreeTests(unittest.TestCase):
         self.assertNotIn("worktree of", out)
         self.assertFalse(self.marker.exists())
 
+    def test_a_full_forgery_outside_the_root_writes_no_marker(self):
+        evil = self.tmp / "evil2"
+        gd = evil / "gd"
+        gd.mkdir(parents=True)
+        (evil / ".git").write_text(f"gitdir: {gd}\n", encoding="utf-8")
+        (gd / "commondir").write_text(f"{self.main / '.git'}\n", encoding="utf-8")
+        (gd / "gitdir").write_text(f"{evil / '.git'}\n", encoding="utf-8")
+        (gd / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        out = self.run_hook(evil)
+        self.assertNotIn("worktree of", out)
+        self.assertFalse(self.marker.exists())
+
 if __name__ == "__main__":
     unittest.main()

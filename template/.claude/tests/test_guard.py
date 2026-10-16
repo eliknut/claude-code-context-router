@@ -1271,5 +1271,16 @@ class WorktreeOwnerTests(TreeFixture, unittest.TestCase):
         d = guard.decide("Write", {"file_path": target}, "acme", REG, self.root, self.memory)
         self.assertEqual(d.action, "deny")
 
+    def test_a_case_variant_of_another_contexts_worktree_is_denied(self):
+        probe = Path(self.tmp.name) / "CaseProbe"
+        probe.mkdir()
+        if not (Path(self.tmp.name) / "caseprobe").exists():
+            self.skipTest("case-sensitive filesystem")
+        variant = Path(str(self.wt).replace("my workspaces/globex/router test",
+                                            "MY Workspaces/Globex/Router Test"))
+        d = guard.decide("Write", {"file_path": str(variant / "a.md")}, "acme",
+                         REG, self.root, self.memory)
+        self.assertEqual(d.action, "deny")
+
 if __name__ == "__main__":
     unittest.main()

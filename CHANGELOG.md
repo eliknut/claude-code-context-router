@@ -25,8 +25,10 @@
   whenever that holds `CONTEXTS.md` and uses `CLAUDE_PROJECT_DIR` only as the fallback, so a
   `CONTEXTS.md` tracked in a worktree's repo cannot replace the registry. The guard maps only
   paths outside the root, so a `.git` file above the root cannot move paths inside it. A worktree
-  counts only when git's own back pointer (`<gitdir>/gitdir`) names it, and a session started
-  inside the root is never a worktree session.
+  counts only when its admin folder sits in the main repo's `.git/worktrees` and git's back
+  pointer (`<gitdir>/gitdir`) names it, compared as the same file so a case variant still
+  matches; a session started inside the root is never a worktree session. A worktree moved with
+  plain `mv` needs `git worktree repair`.
 - The wrapper removes an earlier `claude` alias when sourced, has no root override, and ignores
   `GIT_CEILING_DIRECTORIES` when it looks for the worktree. Hook tests run from a copy installed
   in a temp root. The rendered `orca-settings.json` is mode 644.
